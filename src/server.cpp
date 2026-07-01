@@ -1,5 +1,6 @@
 #include "radixforge/server.h"
 #include "radixforge/json_minimal.h"
+#include "radixforge/logger.h"
 
 #include "httplib.h"
 
@@ -71,29 +72,29 @@ std::vector<PrefillCtx> InferenceWorker::prepare_all(
         // Guard: clamp max_tokens so the total never exceeds the context window.
         int32_t available = bridge_.n_ctx() - (int32_t)ctx.tokens.size() - 4;
         if (available <= 0) {
-            fprintf(stderr, "[radixforge] Prompt too long (%zu tokens) for ctx %d — rejected\n",
+            RF_WARN("worker", "Prompt too long (%zu tokens) for ctx %d — rejected",
                     ctx.tokens.size(), bridge_.n_ctx());
             if (ctx.req.on_token) ctx.req.on_token("[ERROR: prompt exceeds context window]", true);
             continue;
         }
         if (ctx.req.max_tokens > available) {
-            fprintf(stderr, "[radixforge] max_tokens clamped %d → %d (ctx limit)\n",
-                    ctx.req.max_tokens, available);
+            RF_DEBUG("worker", "max_tokens clamped %d -> %d (ctx limit)",
+                     ctx.req.max_tokens, available);
             ctx.req.max_tokens = available;
         }
 
         try {
             ctx.prep  = mapper_.prepare_sequence(ctx.tokens);
         } catch (const std::exception& e) {
-            fprintf(stderr, "[radixforge] prepare_sequence failed: %s\n", e.what());
+            RF_ERROR("worker", "prepare_sequence failed: %s", e.what());
             if (ctx.req.on_token) ctx.req.on_token("[ERROR: resource exhausted]", true);
             continue;
         }
 
-        ctx.delta_start = ctx.prep.cached_pos;  // index into tokens[] where delta begins
+        ctx.delta_start = ctx.prep.cached_pos;
 
-        fprintf(stderr, "[radixforge] Prefill: %zu tokens, cached: %d, delta: %zu\n",
-                ctx.tokens.size(), ctx.prep.cached_pos, ctx.prep.delta.size());
+        RF_DEBUG("worker", "Prefill: %zu tokens, cached: %d, delta: %zu",
+                 ctx.tokens.size(), ctx.prep.cached_pos, ctx.prep.delta.size());
 
         ctxs.push_back(std::move(ctx));
     }
@@ -201,7 +202,7 @@ std::vector<ActiveSeq> InferenceWorker::prefill_range(
     llama_batch_free(batch);
 
     if (!ok) {
-        fprintf(stderr, "[radixforge] Parallel prefill decode failed\n");
+        RF_ERROR("worker", "Parallel prefill decode failed");
         for (size_t i = 0; i < n_sub; i++) {
             auto& ctx = ctxs[from + i];
             if (ctx.req.on_token) ctx.req.on_token("[ERROR: prefill failed]", true);
@@ -349,12 +350,12 @@ void InferenceWorker::run() {
 
         // Phase 2: one GPU prefill call for all deltas
         if (!ctxs.empty()) {
-            fprintf(stderr, "[radixforge] Parallel prefill: %zu sequences\n", ctxs.size());
+            RF_INFO("worker", "Parallel prefill: %zu sequences", ctxs.size());
             auto active = prefill_batch(ctxs);
 
             // Phase 3: batched autoregressive generation
             if (!active.empty()) {
-                fprintf(stderr, "[radixforge] Batch generation: %zu sequences\n", active.size());
+                RF_DEBUG("worker", "Batch generation: %zu sequences", active.size());
                 run_batch(active);
             }
         }
@@ -363,17 +364,18 @@ void InferenceWorker::run() {
         if (request_count_ % 64 < reqs.size()) mapper_.defrag();
 
       } catch (const std::exception& e) {
-        fprintf(stderr, "[radixforge] Worker loop exception (non-fatal): %s\n", e.what());
+        RF_WARN("worker", "Worker loop exception (non-fatal): %s", e.what());
       } catch (...) {
-        fprintf(stderr, "[radixforge] Worker loop unknown exception (non-fatal)\n");
+        RF_WARN("worker", "Worker loop unknown exception (non-fatal)");
       }
     }
 }
 
 // --- Server (cpp-httplib) ---
 
-Server::Server(const Config& config, InferenceWorker& worker)
-    : config_(config), worker_(worker) {}
+Server::Server(const Config& config, InferenceWorker& worker,
+               KVMapper& mapper, RadixTree& tree)
+    : config_(config), worker_(worker), mapper_(mapper), tree_(tree) {}
 
 static void parse_request_body(const httplib::Request& req_http,
                                InferenceRequest& req,
@@ -458,6 +460,33 @@ void Server::start() {
             "{\"status\":\"ok\",\"active_sequences\":" + std::to_string(active_seqs) +
             ",\"pending_requests\":" + std::to_string(pending) + "}",
             "application/json");
+    });
+
+    // /admin/stats — cache metrics and worker state
+    svr.Get("/admin/stats", [this](const httplib::Request&, httplib::Response& res) {
+        const CacheMetrics& m = mapper_.metrics();
+        uint64_t hits  = m.hits.load(std::memory_order_relaxed);
+        uint64_t total = m.total_requests.load(std::memory_order_relaxed);
+        double hit_rate = total > 0 ? static_cast<double>(hits) / total : 0.0;
+        char buf[512];
+        snprintf(buf, sizeof(buf),
+            "{\"active_sequences\":%d,\"pending_requests\":%zu,"
+            "\"cache\":{\"hits\":%llu,\"misses\":%llu,\"evictions\":%llu,"
+            "\"total_requests\":%llu,\"hit_rate\":%.4f}}",
+            worker_.active_sequence_count(), worker_.pending_count(),
+            (unsigned long long)hits,
+            (unsigned long long)m.misses.load(std::memory_order_relaxed),
+            (unsigned long long)m.evictions.load(std::memory_order_relaxed),
+            (unsigned long long)total,
+            hit_rate);
+        res.set_header("Access-Control-Allow-Origin", "*");
+        res.set_content(buf, "application/json");
+    });
+
+    // /admin/tree/dump — radix tree structure as JSON
+    svr.Get("/admin/tree/dump", [this](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        res.set_content(tree_.to_json(), "application/json");
     });
 
     // Chat completions (non-streaming)
@@ -580,7 +609,7 @@ void Server::start() {
     // even after start() returns, so stop() called from signal handler is safe.
     stop_fn_ = [svr_p]() { svr_p->stop(); };
 
-    fprintf(stderr, "[radixforge] HTTP server (httplib) listening on %s:%d\n",
+    RF_INFO("server", "HTTP server listening on %s:%d",
             config_.host.c_str(), config_.port);
 
     svr.listen(config_.host.c_str(), config_.port);

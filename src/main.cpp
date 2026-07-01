@@ -1,6 +1,7 @@
 #include "radixforge/config.h"
 #include "radixforge/kv_mapper.h"
 #include "radixforge/llama_bridge.h"
+#include "radixforge/logger.h"
 #include "radixforge/radix_tree.h"
 #include "radixforge/server.h"
 
@@ -63,14 +64,13 @@ int main(int argc, char** argv) {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    fprintf(stderr, "[radixforge] Loading model: %s\n", config.model_path.c_str());
-    fprintf(stderr, "[radixforge] Context: %d tokens, GPU layers: %d, Max sequences: %d\n",
+    RF_INFO("main", "Loading model: %s", config.model_path.c_str());
+    RF_INFO("main", "Context: %d tokens, GPU layers: %d, Max sequences: %d",
             config.n_ctx, config.n_gpu_layers, config.max_sequences);
 
     // Phase 1: Initialize llama.cpp bridge
     radixforge::LlamaBridge bridge(config);
-    fprintf(stderr, "[radixforge] Model loaded successfully. KV cache: %d slots\n",
-            bridge.n_ctx());
+    RF_INFO("main", "Model loaded. KV cache: %d slots", bridge.n_ctx());
 
     // Phase 2: Initialize Radix Tree
     radixforge::RadixTree tree;
@@ -82,14 +82,12 @@ int main(int argc, char** argv) {
     radixforge::InferenceWorker worker(bridge, tree, mapper);
     worker.start();
 
-    radixforge::Server server(config, worker);
+    radixforge::Server server(config, worker, mapper, tree);
     g_server = &server;
-    fprintf(stderr, "[radixforge] Server listening on %s:%d\n",
-            config.host.c_str(), config.port);
 
     server.start();  // blocks until shutdown
 
     worker.stop();
-    fprintf(stderr, "[radixforge] Shutdown complete.\n");
+    RF_INFO("main", "Shutdown complete.");
     return 0;
 }

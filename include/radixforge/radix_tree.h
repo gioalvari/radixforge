@@ -4,6 +4,7 @@
 #include <memory>
 #include <set>
 #include <shared_mutex>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
@@ -80,6 +81,9 @@ public:
 
     // Get current number of active sequences (sum of all seq_ids across nodes).
     int32_t active_sequence_count() const;
+
+    // Serialize the tree structure to a JSON string for diagnostics.
+    std::string to_json() const;
 
     RadixNode* root() { return root_.get(); }
 

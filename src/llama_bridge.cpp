@@ -31,6 +31,7 @@ LlamaBridge::LlamaBridge(const Config& config) : config_(config) {
     auto ctx_params = llama_context_default_params();
     ctx_params.n_ctx     = config.n_ctx;
     ctx_params.n_batch   = config.n_batch;
+    ctx_params.n_ubatch  = config.n_batch;  // must equal n_batch for encoder models
     ctx_params.n_seq_max = config.max_sequences;
 
     ctx_.reset(llama_init_from_model(model_.get(), ctx_params));

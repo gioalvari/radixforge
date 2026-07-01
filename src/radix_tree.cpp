@@ -1,6 +1,7 @@
 #include "radixforge/radix_tree.h"
 
 #include <algorithm>
+#include <string>
 
 namespace radixforge {
 
@@ -200,6 +201,52 @@ int32_t RadixTree::active_sequence_count() const {
         }
     }
     return count;
+}
+
+// --- JSON serialization ---
+
+static std::string node_to_json(const RadixNode* node, int32_t cumulative_tokens) {
+    std::string s = "{";
+    int32_t depth = cumulative_tokens + (int32_t)node->tokens.size();
+    s += "\"token_count\":"       + std::to_string(node->tokens.size()) + ",";
+    s += "\"cumulative_tokens\":" + std::to_string(depth) + ",";
+    s += "\"ref_count\":"         + std::to_string(node->ref_count) + ",";
+    s += "\"canonical_len\":"     + std::to_string(node->canonical_len) + ",";
+    s += "\"last_access_tick\":"  + std::to_string(node->last_access_tick) + ",";
+    s += "\"seq_ids\":[";
+    bool first = true;
+    for (auto sid : node->seq_ids) {
+        if (!first) s += ",";
+        s += std::to_string(sid);
+        first = false;
+    }
+    s += "],\"children\":[";
+    bool first_child = true;
+    for (const auto& [key, child] : node->children) {
+        if (!first_child) s += ",";
+        s += node_to_json(child.get(), depth);
+        first_child = false;
+    }
+    s += "]}";
+    return s;
+}
+
+std::string RadixTree::to_json() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+
+    // Count active sequences without re-entering the lock
+    int32_t active = 0;
+    std::vector<const RadixNode*> stk = {root_.get()};
+    while (!stk.empty()) {
+        const RadixNode* n = stk.back(); stk.pop_back();
+        active += (int32_t)n->seq_ids.size();
+        for (const auto& [k, c] : n->children) stk.push_back(c.get());
+    }
+
+    std::string out = "{\"tick\":" + std::to_string(tick_) + ",";
+    out += "\"active_sequences\":" + std::to_string(active) + ",";
+    out += "\"root\":" + node_to_json(root_.get(), 0) + "}";
+    return out;
 }
 
 } // namespace radixforge

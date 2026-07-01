@@ -7,7 +7,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # --- Options ---
 option(RADIXFORGE_METAL "Enable Metal acceleration (macOS)" ON)
-option(RADIXFORGE_BUILD_TESTS "Build unit tests" OFF)
+option(RADIXFORGE_BUILD_TESTS "Build unit tests" ON)
 
 # --- llama.cpp as subdirectory ---
 # Disable llama.cpp extras we don't need
@@ -59,3 +59,7 @@ if(APPLE AND RADIXFORGE_METAL)
 endif()
 
 target_compile_options(radixforge PRIVATE -Wall -Wextra -Wpedantic)
+
+if(RADIXFORGE_BUILD_TESTS)
+    add_subdirectory(test)
+endif()

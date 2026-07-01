@@ -96,7 +96,8 @@ private:
 // HTTP server using cpp-httplib (OpenAI-compatible /v1/chat/completions).
 class Server {
 public:
-    Server(const Config& config, InferenceWorker& worker);
+    Server(const Config& config, InferenceWorker& worker,
+           KVMapper& mapper, RadixTree& tree);
 
     void start();  // blocking
     void stop();   // thread-safe; interrupts start() from another thread
@@ -104,6 +105,8 @@ public:
 private:
     Config config_;
     InferenceWorker& worker_;
+    KVMapper& mapper_;
+    RadixTree& tree_;
     std::atomic<bool> running_{false};
     std::function<void()> stop_fn_;  // set by start(), called by stop()
 };
