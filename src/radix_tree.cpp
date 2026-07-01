@@ -1,0 +1,205 @@
+#include "radixforge/radix_tree.h"
+
+#include <algorithm>
+
+namespace radixforge {
+
+RadixTree::RadixTree() {
+    root_ = std::make_unique<RadixNode>();
+    root_->ref_count = 1;  // root never gets evicted
+}
+
+PrefixMatch RadixTree::insert(const std::vector<llama_token>& prompt_tokens) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    ++tick_;
+
+    PrefixMatch match = find_prefix_locked(prompt_tokens);
+
+    // The node found by find_prefix is the cache_node (it may have physical KV data).
+    match.cache_node = match.node;
+
+    // If there are unmatched tokens, create a new leaf node to hold them.
+    // This populates the tree so future requests can share the prefix.
+    if (!match.remaining.empty()) {
+        auto new_leaf = std::make_unique<RadixNode>();
+        new_leaf->tokens = match.remaining;
+        new_leaf->parent = match.node;
+        new_leaf->last_access_tick = tick_;
+        llama_token key = match.remaining[0];
+        match.node->children[key] = std::move(new_leaf);
+        match.node = match.node->children[key].get();
+    }
+
+    match.node->last_access_tick = tick_;
+    match.node->ref_count++;
+
+    return match;
+}
+
+void RadixTree::release(RadixNode* node) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (node && node->ref_count > 0) {
+        node->ref_count--;
+    }
+}
+
+PrefixMatch RadixTree::find_prefix_locked(const std::vector<llama_token>& tokens) {
+    RadixNode* current = root_.get();
+    int32_t matched_total = 0;
+    size_t token_idx = 0;
+    llama_seq_id captured_seq_id = -1;  // seq_id captured before a node split
+
+    while (token_idx < tokens.size()) {
+        llama_token next_token = tokens[token_idx];
+
+        auto it = current->children.find(next_token);
+        if (it == current->children.end()) {
+            // No child matches — this is where we diverge
+            break;
+        }
+
+        RadixNode* child = it->second.get();
+
+        // Match tokens within this child node
+        size_t match_len = 0;
+        while (match_len < child->tokens.size() &&
+               token_idx + match_len < tokens.size() &&
+               child->tokens[match_len] == tokens[token_idx + match_len]) {
+            match_len++;
+        }
+
+        if (match_len < child->tokens.size()) {
+            // Partial match within node — split needed.
+            // Capture seq_id BEFORE split; seq_ids stay on the prefix node after split
+            // so the capture and the node's seq_ids remain consistent.
+            if (!child->seq_ids.empty()) {
+                captured_seq_id = *child->seq_ids.begin();
+            }
+            split_node(child, match_len);
+            // After split, child now contains only the matched prefix
+            matched_total += (int32_t)match_len;
+            token_idx += match_len;
+            current = child;
+            break;
+        }
+
+        // Full match of this node
+        matched_total += (int32_t)child->tokens.size();
+        token_idx += child->tokens.size();
+        current = child;
+    }
+
+    PrefixMatch result;
+    result.node = current;
+    result.cache_node = current;
+    result.matched_tokens = matched_total;
+    result.remaining.assign(tokens.begin() + token_idx, tokens.end());
+    result.cache_seq_id = captured_seq_id;
+    return result;
+}
+
+void RadixTree::split_node(RadixNode* node, size_t split_pos) {
+    // Create a new child that holds the suffix (the original path beyond split_pos).
+    auto suffix_node = std::make_unique<RadixNode>();
+    suffix_node->tokens.assign(node->tokens.begin() + split_pos, node->tokens.end());
+
+    // Bug fix (was: MOVE seq_ids to suffix, copy ref_count → both corrupted).
+    // seq_ids STAY on the prefix (node): active requests have leaf_node=node and
+    // release_sequence looks for their seq_id in node->seq_ids. Moving them to
+    // suffix breaks that lookup, causing spurious physical KV destruction.
+    // The suffix starts with empty seq_ids; it will accumulate its own once a
+    // request decodes through the full suffix path.
+    // ref_count STAYS on prefix (active requests point to node, not suffix).
+    // Suffix starts at 0 — no request has it as leaf_node yet.
+    suffix_node->seq_ids.clear();
+    suffix_node->canonical_len = 0;
+    suffix_node->ref_count = 0;
+    suffix_node->last_access_tick = node->last_access_tick;
+    suffix_node->parent = node;
+
+    // Move all children of original node to the suffix node
+    suffix_node->children = std::move(node->children);
+    for (auto& [key, child] : suffix_node->children) {
+        child->parent = suffix_node.get();
+    }
+
+    // Truncate the original node to prefix only.
+    // seq_ids, canonical_len, and ref_count remain on the prefix node.
+    node->tokens.resize(split_pos);
+    node->children.clear();
+
+    // The suffix becomes the single child of the (now prefix-only) node
+    llama_token suffix_key = suffix_node->tokens[0];
+    node->children[suffix_key] = std::move(suffix_node);
+}
+
+std::vector<RadixNode*> RadixTree::find_eviction_candidates(int32_t count) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    std::vector<RadixNode*> leaves;
+
+    // BFS to find leaf nodes with ref_count == 0
+    std::vector<RadixNode*> stack = {root_.get()};
+    while (!stack.empty()) {
+        RadixNode* node = stack.back();
+        stack.pop_back();
+
+        if (node->children.empty() && node->ref_count == 0 && node != root_.get()) {
+            leaves.push_back(node);
+        }
+        for (auto& [key, child] : node->children) {
+            stack.push_back(child.get());
+        }
+    }
+
+    // Sort by LRU (oldest access first)
+    std::sort(leaves.begin(), leaves.end(), [](RadixNode* a, RadixNode* b) {
+        return a->last_access_tick < b->last_access_tick;
+    });
+
+    if ((int32_t)leaves.size() > count) {
+        leaves.resize(count);
+    }
+    return leaves;
+}
+
+void RadixTree::evict(RadixNode* node) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (!node || !node->parent) return;
+
+    RadixNode* parent = node->parent;
+    llama_token key = node->tokens[0];
+    parent->children.erase(key);
+
+    // If parent now has a single child and no references, merge them
+    if (parent->children.size() == 1 && parent != root_.get() && parent->ref_count == 0) {
+        auto it = parent->children.begin();
+        RadixNode* only_child = it->second.get();
+        parent->tokens.insert(parent->tokens.end(),
+                              only_child->tokens.begin(), only_child->tokens.end());
+        parent->seq_ids = only_child->seq_ids;
+        parent->canonical_len = only_child->canonical_len;
+        parent->ref_count = only_child->ref_count;
+        parent->last_access_tick = only_child->last_access_tick;
+        parent->children = std::move(only_child->children);
+        for (auto& [k, c] : parent->children) {
+            c->parent = parent;
+        }
+    }
+}
+
+int32_t RadixTree::active_sequence_count() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);  // read-only: shared lock
+    int32_t count = 0;
+    std::vector<const RadixNode*> stack = {root_.get()};
+    while (!stack.empty()) {
+        const RadixNode* node = stack.back();
+        stack.pop_back();
+        count += (int32_t)node->seq_ids.size();
+        for (auto& [key, child] : node->children) {
+            stack.push_back(child.get());
+        }
+    }
+    return count;
+}
+
+} // namespace radixforge

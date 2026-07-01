@@ -1,0 +1,26 @@
+# Build artifacts
+build/
+
+# Downloaded models (can be large)
+models/
+
+# llama.cpp vendor clone (reconstructed by setup.sh)
+vendor/
+
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Compiled binaries
+*.o
+*.a
+*.dylib
