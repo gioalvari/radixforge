@@ -2,85 +2,85 @@
 
 **Radix Tree KV Cache Orchestrator for multi-agent LLM inference on Apple Silicon.**
 
-RadixForge è un server di inferenza LLM scritto in C++ che risolve il problema fondamentale del multi-agent: quando 10 agenti AI condividono lo stesso system prompt da 2000 token, perché ricalcolarlo 10 volte? RadixForge lo calcola una volta sola e lo condivide in memoria — **zero-copy**.
+RadixForge is a C++ LLM inference server that solves the core multi-agent problem: when 10 AI agents share the same 2000-token system prompt, why compute it 10 times? RadixForge computes it once and shares it in memory — **zero-copy**.
 
-Costruito direttamente sopra le API native di [llama.cpp](https://github.com/ggerganov/llama.cpp), senza kernel GPU personalizzati. La matematica è di llama.cpp; il cervello di orchestrazione è RadixForge.
-
----
-
-## Come funziona
-
-```
-[Richiesta Agente A]  [Richiesta Agente B]  [Richiesta Agente C]
-        |                     |                     |
-        └──────────┬──────────┘                     |
-                   ▼                                |
-       [Radix Tree Orchestrator]  ◄─────────────────┘
-       (trova il prefisso comune)
-                   |
-       ┌───────────┴──────────────┐
-       ▼                          ▼
-  [Prefisso condiviso]     [Delta specifico]
-  (già in KV cache)        (da calcolare)
-       |                          |
-       └────────┬─────────────────┘
-                ▼
-    [llama_memory_seq_cp]   ← copia zero-copy in VRAM
-                |
-    [llama_decode su Metal] ← solo i token delta (risparmio ~76%)
-                |
-    [SSE Streaming Response]
-```
-
-### Il Radix Tree
-
-Il Radix Tree vive interamente su CPU ed è la struttura dati centrale. Ogni nodo contiene:
-- Un vettore di token (la "chiave" del nodo)
-- Un `ref_count` (quanti agenti stanno usando questo nodo)
-- Un insieme di `llama_seq_id` (quali slot fisici nella KV cache contengono i dati calcolati)
-
-Quando due richieste condividono un prefisso, il tree **splitta** il nodo al punto di divergenza e assegna un ramo per ogni agente. La VRAM viene allocata in `seq_id` fisici separati, ma il contenuto del prefisso viene copiato a costo zero tramite `llama_memory_seq_cp`.
-
-### Il KV Mapper
-
-Il KV Mapper traduce le operazioni logiche del Radix Tree in chiamate alle API di llama.cpp:
-
-- `prepare_sequence(tokens)` → trova il prefisso nel tree, copia la cache, restituisce i token delta
-- `release_sequence(seq_id)` → mantiene il `seq_id` attivo nella cache per riuso futuro (non lo libera)
-- `gc_if_needed()` → LRU eviction quando i canali fisici si esauriscono
-
-### Il Server HTTP
-
-Server HTTP (cpp-httplib, zero dipendenze esterne) con un singolo `InferenceWorker` thread. Questo è intenzionale: Apple Silicon non ha multi-tenancy hardware della GPU — un singolo thread che gestisce una coda è più efficiente di N thread che si contendono Metal.
+Built directly on top of the native [llama.cpp](https://github.com/ggerganov/llama.cpp) APIs, with no custom GPU kernels. The math is llama.cpp's; the orchestration logic is RadixForge's.
 
 ---
 
-## Requisiti
+## How It Works
 
-- **macOS 13+** (Ventura o superiore)
-- **Apple Silicon** (M1 / M2 / M3 / M4 — qualsiasi variante)
+```
+[Agent A Request]  [Agent B Request]  [Agent C Request]
+        |                  |                  |
+        └─────────┬─────────┘                  |
+                  ▼                            |
+      [Radix Tree Orchestrator]  ◄─────────────┘
+      (finds longest common prefix)
+                  |
+      ┌───────────┴──────────────┐
+      ▼                          ▼
+ [Shared prefix]           [Agent-specific delta]
+ (already in KV cache)     (needs to be computed)
+      |                          |
+      └──────────┬───────────────┘
+                 ▼
+   [llama_memory_seq_cp]   ← zero-copy into VRAM
+                 |
+   [llama_decode on Metal] ← delta tokens only (~76% savings)
+                 |
+   [SSE Streaming Response]
+```
+
+### The Radix Tree
+
+The Radix Tree lives entirely on CPU and is the central data structure. Each node contains:
+- A token vector (the node's "key")
+- A `ref_count` (how many agents are currently using this node)
+- A set of `llama_seq_id` values (which physical KV cache slots hold the computed data)
+
+When two requests share a prefix, the tree **splits** the node at the divergence point and allocates a branch for each agent. VRAM is allocated in separate physical `seq_id` slots, but the prefix content is copied at zero cost via `llama_memory_seq_cp`.
+
+### The KV Mapper
+
+The KV Mapper translates Radix Tree logical operations into llama.cpp API calls:
+
+- `prepare_sequence(tokens)` → finds the prefix in the tree, copies the cache, returns the delta tokens
+- `release_sequence(seq_id)` → keeps the `seq_id` alive in cache for future reuse (does not free it)
+- `gc_if_needed()` → LRU eviction when physical slots run out
+
+### The HTTP Server
+
+Single-threaded HTTP server (cpp-httplib, no external dependencies) with a single `InferenceWorker` thread. This is intentional: Apple Silicon has no hardware GPU multi-tenancy — a single thread managing a queue is more efficient than N threads contending for Metal.
+
+---
+
+## Requirements
+
+- **macOS 13+** (Ventura or later)
+- **Apple Silicon** (M1 / M2 / M3 / M4 — any variant)
 - **Xcode Command Line Tools**: `xcode-select --install`
 - **CMake 3.21+**: `brew install cmake`
 - **Git**
-- Un file modello in formato **GGUF**
+- A model file in **GGUF** format
 
 ---
 
 ## Build
 
 ```bash
-# 1. Clona il progetto
-git clone <url-repo> radixforge
+# 1. Clone the project
+git clone https://github.com/gioalvari/radixforge
 cd radixforge
 
-# 2. Build automatico (clona llama.cpp, configura Metal, compila)
+# 2. One-command build (clones llama.cpp, configures Metal, compiles)
 chmod +x scripts/setup.sh
 ./scripts/setup.sh
 ```
 
-Il binario viene prodotto in `build/radixforge` (~120KB stripped). La prima esecuzione è più lenta perché Metal compila i kernel JIT (~30 secondi); le esecuzioni successive usano la cache.
+The binary is produced at `build/radixforge` (~120KB stripped). The first run is slower because Metal compiles the kernels JIT (~30 seconds); subsequent runs use the cache.
 
-### Build manuale
+### Manual build
 
 ```bash
 git clone --depth 1 https://github.com/ggerganov/llama.cpp vendor/llama.cpp
@@ -95,34 +95,34 @@ cmake --build build --config Release -j$(sysctl -n hw.ncpu)
 
 ---
 
-## Utilizzo
+## Usage
 
-### Avvio
+### Starting the server
 
 ```bash
 ./build/radixforge \
-  -m /percorso/al/modello.gguf \
+  -m /path/to/model.gguf \
   --ctx-size 8192 \
   --max-seq 16 \
   --port 8400
 ```
 
-### Opzioni CLI
+### CLI options
 
-| Flag | Default | Descrizione |
+| Flag | Default | Description |
 |------|---------|-------------|
-| `-m, --model` | *(obbligatorio)* | Percorso al file `.gguf` |
-| `-c, --ctx-size` | `32768` | Dimensione totale della KV cache (token) |
-| `-b, --batch-size` | `2048` | Dimensione massima del batch di decode |
-| `-ngl, --n-gpu-layers` | `99` | Layer offloaded su Metal (99 = tutto) |
-| `--host` | `127.0.0.1` | Indirizzo di ascolto |
-| `--port` | `8400` | Porta HTTP |
-| `--max-seq` | `32` | Numero massimo di sequenze concorrenti |
+| `-m, --model` | *(required)* | Path to the `.gguf` model file |
+| `-c, --ctx-size` | `32768` | Total KV cache size (tokens) |
+| `-b, --batch-size` | `2048` | Maximum decode batch size |
+| `-ngl, --n-gpu-layers` | `99` | Layers offloaded to Metal (99 = all) |
+| `--host` | `127.0.0.1` | Bind address |
+| `--port` | `8400` | HTTP port |
+| `--max-seq` | `32` | Maximum concurrent sequences |
 
-### Consigli sulla configurazione
+### Configuration guide
 
-| Memoria unificata Mac | `--ctx-size` consigliato | `--max-seq` |
-|----------------------|--------------------------|-------------|
+| Mac unified memory | Recommended `--ctx-size` | `--max-seq` |
+|-------------------|--------------------------|-------------|
 | 16 GB | 8192 | 8 |
 | 32 GB | 16384 | 16 |
 | 64 GB | 32768 | 32 |
@@ -132,7 +132,7 @@ cmake --build build --config Release -j$(sysctl -n hw.ncpu)
 
 ## API
 
-RadixForge espone un'API compatibile con OpenAI. Qualsiasi client che usa l'API OpenAI funziona senza modifiche puntando a `http://localhost:8400`.
+RadixForge exposes an OpenAI-compatible API. Any client that uses the OpenAI API works without changes by pointing to `http://localhost:8400`.
 
 ### `GET /health`
 
@@ -151,8 +151,8 @@ curl http://localhost:8400/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "messages": [
-      {"role": "system", "content": "Sei un assistente utile."},
-      {"role": "user", "content": "Quanto fa 3+3?"}
+      {"role": "system", "content": "You are a helpful assistant."},
+      {"role": "user", "content": "What is 3+3?"}
     ],
     "max_tokens": 100,
     "temperature": 0.7,
@@ -169,133 +169,133 @@ curl http://localhost:8400/v1/chat/completions \
 }
 ```
 
-**Risposta in streaming (SSE):**
+**Streaming response (SSE):**
 
 ```bash
 curl http://localhost:8400/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "messages": [{"role": "user", "content": "Scrivi una poesia breve."}],
+    "messages": [{"role": "user", "content": "Write a short poem."}],
     "max_tokens": 200,
     "stream": true
   }'
 ```
 
-Ogni chunk SSE è un JSON con `delta.content`. L'ultimo chunk ha `finish_reason: "stop"` e il segnale `data: [DONE]`.
+Each SSE chunk is a JSON object with `delta.content`. The last chunk carries `finish_reason: "stop"` and the `data: [DONE]` sentinel.
 
-### Uso con VS Code (Copilot-compatible client)
+### Using with VS Code (Continue, Cody, Jan)
 
-Qualsiasi estensione che supporta endpoint OpenAI custom (es. **Continue**, **Cody**, **Jan**) può puntare a `http://127.0.0.1:8400` con una chiave API arbitraria.
+Any extension that supports custom OpenAI endpoints can point to `http://127.0.0.1:8400` with an arbitrary API key.
 
 ---
 
-## Esempio multi-agent: prefix sharing in azione
+## Multi-agent example: prefix sharing in action
 
-Questo è il caso d'uso principale. Due o più agenti condividono lo stesso system prompt:
+This is the primary use case. Two or more agents share the same system prompt:
 
 ```bash
-SHARED_PROMPT="Sei un esperto di matematica. Rispondi in modo conciso."
+SHARED_PROMPT="You are a math expert. Answer concisely."
 
-# Agente A — prima richiesta (cache MISS: calcola tutto)
+# Agent A — first request (cache MISS: full prefill)
 curl http://localhost:8400/v1/chat/completions -H "Content-Type: application/json" -d "{
   \"messages\": [
     {\"role\": \"system\", \"content\": \"$SHARED_PROMPT\"},
-    {\"role\": \"user\",   \"content\": \"Quanto fa 3+3?\"}
+    {\"role\": \"user\",   \"content\": \"What is 3+3?\"}
   ],
   \"max_tokens\": 20, \"stream\": false
 }"
 
-# Agente B — seconda richiesta con stesso system prompt (cache HIT: salta il prefisso)
+# Agent B — second request with same system prompt (cache HIT: skips prefix)
 curl http://localhost:8400/v1/chat/completions -H "Content-Type: application/json" -d "{
   \"messages\": [
     {\"role\": \"system\", \"content\": \"$SHARED_PROMPT\"},
-    {\"role\": \"user\",   \"content\": \"Quanto fa 7+7?\"}
+    {\"role\": \"user\",   \"content\": \"What is 7+7?\"}
   ],
   \"max_tokens\": 20, \"stream\": false
 }"
 ```
 
-**Log atteso:**
+**Expected log output:**
 
 ```
-[radixforge] Prefill: 37 tokens, cached: 0,  delta: 37  ← Agente A: calcola tutto
+[radixforge] Prefill: 37 tokens, cached: 0,  delta: 37  ← Agent A: full compute
 [radixforge] KV cache hit: copied 28 tokens from seq 1 → seq 2
-[radixforge] Prefill: 37 tokens, cached: 28, delta: 9   ← Agente B: solo 9 token delta (76% risparmio)
+[radixforge] Prefill: 37 tokens, cached: 28, delta: 9   ← Agent B: 9 delta tokens (76% savings)
 ```
 
 ---
 
-## Struttura del progetto
+## Project structure
 
 ```
 radixforge/
 ├── CMakeLists.txt              # Build system — llama.cpp via add_subdirectory
 ├── scripts/
-│   └── setup.sh               # Build one-command
+│   └── setup.sh               # One-command build script
 ├── include/radixforge/
-│   ├── config.h               # Struct di configurazione runtime
-│   ├── llama_bridge.h         # Fase 1: RAII wrapper per llama.cpp
-│   ├── radix_tree.h           # Fase 2: Radix Tree (struttura dati core)
-│   ├── kv_mapper.h            # Fase 3: Mapper virtuale→fisico della KV cache
-│   ├── server.h               # Fase 4: HTTP server + InferenceWorker
-│   └── json_minimal.h         # Parser JSON recursive-descent (no deps esterni)
+│   ├── config.h               # Runtime configuration struct
+│   ├── llama_bridge.h         # Phase 1: RAII wrapper for llama.cpp
+│   ├── radix_tree.h           # Phase 2: Radix Tree (core data structure)
+│   ├── kv_mapper.h            # Phase 3: Virtual→physical KV cache mapper
+│   ├── server.h               # Phase 4: HTTP server + InferenceWorker
+│   └── json_minimal.h         # Recursive-descent JSON parser (no external deps)
 ├── src/
-│   ├── main.cpp               # Entry point + parsing CLI
-│   ├── llama_bridge.cpp       # Integrazione llama.cpp (decode, sample, memory_seq_cp)
-│   ├── radix_tree.cpp         # Logica dell'albero (insert, split, evict, LRU)
-│   ├── kv_mapper.cpp          # GC, eviction, sincronizzazione cache
-│   └── server.cpp             # HTTP (httplib), SSE streaming, loop generazione
+│   ├── main.cpp               # Entry point + CLI parsing
+│   ├── llama_bridge.cpp       # llama.cpp integration (decode, sample, memory_seq_cp)
+│   ├── radix_tree.cpp         # Tree logic (insert, split, evict, LRU)
+│   ├── kv_mapper.cpp          # GC, eviction, cache synchronization
+│   └── server.cpp             # HTTP (httplib), SSE streaming, generation loop
 ├── vendor/
-│   └── llama.cpp/             # llama.cpp clonato (non submodule)
-└── models/                    # Cartella modelli (ignorata da git)
+│   └── llama.cpp/             # llama.cpp clone (not a submodule)
+└── models/                    # Model files directory (git-ignored)
 ```
 
 ---
 
-## Architettura interna: note tecniche
+## Architecture notes
 
-### Perché un singolo worker thread?
+### Why a single worker thread?
 
-Apple Silicon non ha multi-tenancy hardware della GPU (a differenza di NVIDIA con MIG). Se lanci due `llama_decode` su thread diversi, Metal li serializza comunque in coda. Un singolo worker con batching esplicito è la strategia ottimale: meno overhead di context switch, più token per singolo comando Metal.
+Apple Silicon has no hardware GPU multi-tenancy (unlike NVIDIA with MIG). If you launch two `llama_decode` calls on separate threads, Metal serializes them in the command queue anyway. A single worker with explicit batching is the optimal strategy: less context-switch overhead, more tokens per Metal command.
 
-### Perché `seq_cp` copia sempre il buffer intero?
+### Why does `seq_cp` always copy the full buffer?
 
-L'API `llama_memory_seq_cp` di llama.cpp (v0.15+) supporta copie parziali solo dentro lo stesso "stream" (sequenza fisica contigua). Per copie cross-stream — che si verificano quando src e dst appartengono a canali diversi — richiede `p0=0, p1=-1` (full copy). RadixForge aggira questo copiando tutto e poi chiamando `llama_memory_seq_rm(dst, matched_tokens, -1)` per rimuovere i token in eccesso.
+The `llama_memory_seq_cp` API in llama.cpp (v0.15+) only supports partial copies within the same "stream" (contiguous physical sequence). For cross-stream copies — which occur when src and dst belong to different channels — it requires `p0=0, p1=-1` (full copy). RadixForge works around this by copying everything and then calling `llama_memory_seq_rm(dst, matched_tokens, -1)` to discard the excess tokens.
 
 ### LRU Eviction
 
-Quando il pool di `seq_id` fisici si esaurisce, `KVMapper::evict_one()` trova il nodo foglia del Radix Tree con il `last_access_tick` più vecchio e chiama `llama_memory_seq_rm` per liberare la VRAM. Il nodo viene rimosso dall'albero. La prossima richiesta che corrispondeva a quel prefisso lo ricalcola da zero.
+When the physical `seq_id` pool is exhausted, `KVMapper::evict_one()` finds the Radix Tree leaf node with the oldest `last_access_tick` and calls `llama_memory_seq_rm` to free the VRAM. The node is removed from the tree. The next request matching that prefix recomputes it from scratch.
 
 ### `find_covering_seq_id()`
 
-Dopo uno split del nodo, i `seq_ids` **restano sul nodo prefisso (padre)** — il nodo suffisso (figlio) parte con `seq_ids` vuoto. `find_covering_seq_id()` controlla prima il nodo padre prima di scendere nei figli: questo permette a nuove richieste che fanno match nel suffisso di trovare comunque la cache fisica del prefisso, senza ricalcolare i token già presenti.
+After a node split, the `seq_ids` **stay on the prefix (parent) node** — the suffix (child) node starts with an empty `seq_ids` set. `find_covering_seq_id()` checks the parent node before descending into children: this lets new requests that match in the suffix still find the physical cache of the prefix, without recomputing already-cached tokens.
 
 ---
 
-## Limitazioni note
+## Known limitations
 
-- **Solo macOS / Apple Silicon** — il backend Metal è hardcoded. Linux/NVIDIA è tecnicamente supportabile (basta rimuovere i framework Metal dal CMake) ma non testato.
-- **Single model** — il server carica un unico modello GGUF all'avvio. Per servire modelli diversi in parallelo sono necessarie istanze separate su porte diverse.
-- **Chat template fisso** — usa ChatML (`<|im_start|>role\ncontent<|im_end|>`). Modelli con template diversi (Llama-3, Mistral) potrebbero avere qualità degradata.
-- **Nessun tool use / function calling** — solo completions testuali.
+- **macOS / Apple Silicon only** — the Metal backend is hardcoded. Linux/NVIDIA is technically feasible (remove Metal frameworks from CMake) but untested.
+- **Single model** — the server loads one GGUF model at startup. Serving different models in parallel requires separate instances on different ports.
+- **Fixed chat template** — uses ChatML (`<|im_start|>role\ncontent<|im_end|>`). Models with different templates (Llama-3, Mistral) may produce degraded quality.
+- **No tool use / function calling** — text completions only.
 
 ---
 
-## Modelli consigliati
+## Recommended models
 
-Qualsiasi modello GGUF funziona. Alcuni testati:
+Any GGUF model works. Some tested options:
 
-| Modello | Dimensione | Qualità | RAM necessaria |
-|---------|-----------|---------|----------------|
+| Model | Size | Quality | RAM needed |
+|-------|------|---------|------------|
 | `Qwen2.5-0.5B-Instruct-Q4_K_M` | 469 MB | Test/dev | 2 GB |
 | `Qwen2.5-7B-Instruct-Q4_K_M` | 4.7 GB | ★★★★☆ | 8 GB |
 | `Llama-3.2-3B-Instruct-Q4_K_M` | 2.0 GB | ★★★☆☆ | 4 GB |
 | `Mistral-7B-Instruct-v0.3-Q4_K_M` | 4.4 GB | ★★★★☆ | 8 GB |
 
-Download da [Hugging Face](https://huggingface.co/models?sort=trending&search=gguf&pipeline_tag=text-generation).
+Download from [Hugging Face](https://huggingface.co/models?sort=trending&search=gguf&pipeline_tag=text-generation).
 
 ---
 
-## Licenza
+## License
 
-MIT — vedi `LICENSE`.
+MIT — see `LICENSE`.
