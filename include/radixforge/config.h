@@ -25,6 +25,12 @@ struct Config {
     int32_t max_tokens   = 4096;
     float   temperature  = 0.7f;
     float   top_p        = 0.9f;
+
+    // Security
+    std::string admin_token;  // if set, /admin/* requires Authorization: Bearer <token>
+
+    // Logging
+    std::string log_level = "info";  // debug | info | warn | error
 };
 
 } // namespace radixforge

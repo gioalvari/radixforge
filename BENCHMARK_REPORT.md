@@ -1,113 +1,113 @@
 # RadixForge — Performance Benchmark Report
 
-**Data:** 2026-06-25 (v3: parallel prefill + shared_mutex + canonical-trim + httplib + timeout)
-**Modello:** `qwen2.5-0.5b-instruct-q4_k_m` (0.5B parametri, Q4_K_M)  
-**Hardware:** Apple Silicon (Metal backend, n_gpu_layers=99)  
-**Contesto:** 4096 token, max_sequences=16  
+**Date:** 2026-06-25 (v3: parallel prefill + shared_mutex + canonical-trim + httplib + timeout)
+**Model:** `qwen2.5-0.5b-instruct-q4_k_m` (0.5B parameters, Q4_K_M quantization)
+**Hardware:** Apple Silicon (Metal backend, n_gpu_layers=99)
+**Context:** 4096 tokens, max_sequences=16
 
 ---
 
-## Riepilogo Esecutivo
+## Executive Summary
 
-| Metrica | Valore |
-|---------|--------|
-| Speedup KV cache sharing (warm vs cold) | **1.17x** (227ms → 194ms) |
-| Full cache hit latency | **228ms** (stesso prompt) |
-| Parallel N=4 wall-time | **437ms** vs sequential **577ms** (1.32x speedup) |
+| Metric | Value |
+|--------|-------|
+| KV cache sharing speedup (warm vs cold) | **1.17×** (227ms → 194ms) |
+| Full cache hit latency | **228ms** (identical prompt) |
+| Parallel N=4 wall-time | **437ms** vs sequential **577ms** (1.32× speedup) |
 | Single inference latency | **74–227ms** |
-| Thread safety | ✅ shared_mutex (read-concurrent, write-exclusive) |
-| Non-streaming timeout | ✅ 60s (504 se modello non risponde) |
-| HTTP server | ✅ httplib (stabile, no POSIX socket raw) |
-| Canonical KV accumulation | ✅ Risolto (canonical_len trim) |
-| Race condition release_sequence | ✅ Risolto (mutex per check+erase atomico) |
-| Chat template multi-turn | ✅ Corretto |
+| Thread safety | ✅ shared_mutex (concurrent reads, exclusive writes) |
+| Non-streaming timeout | ✅ 60s (504 if model is unresponsive) |
+| HTTP server | ✅ httplib (stable, no raw POSIX sockets) |
+| Canonical KV accumulation | ✅ Fixed (canonical_len trim) |
+| Race condition in release_sequence | ✅ Fixed (atomic check+erase under mutex) |
+| Multi-turn chat template | ✅ Correct |
 
 ---
 
 ## v3 Improvements: Benchmark Results (2026-06-25)
 
-### 5 Miglioramenti Implementati
+### 5 Improvements Implemented
 
-| Miglioramento | Stato | Impatto |
-|---------------|-------|---------|
-| Parallel prefill (tutti i delta in 1 `llama_decode`) | ✅ | N=4 parallel: 437ms vs 577ms sequenziale (**1.32x**) |
-| `shared_mutex` (reads concorrenti, write esclusivi) | ✅ | No deadlock su N=8+ thread concorrenti |
-| Canonical KV trim (`canonical_len`) | ✅ | Previene accumulo KV infinito su full-cache-hit ripetuti |
-| Race condition fix `release_sequence` | ✅ | Check+erase atomico sotto mutex |
-| httplib server (sostituisce POSIX socket raw) | ✅ | Server stabile, 0 crash in 20+ request test |
-| 60s timeout non-streaming | ✅ | 504 Gateway Timeout invece di attesa infinita |
+| Improvement | Status | Impact |
+|-------------|--------|--------|
+| Parallel prefill (all deltas in one `llama_decode`) | ✅ | N=4 parallel: 437ms vs 577ms sequential (**1.32×**) |
+| `shared_mutex` (concurrent reads, exclusive writes) | ✅ | No deadlock on N=8+ concurrent threads |
+| Canonical KV trim (`canonical_len`) | ✅ | Prevents infinite KV accumulation on repeated full-cache-hit |
+| Race condition fix `release_sequence` | ✅ | Atomic check+erase under mutex |
+| httplib server (replaces raw POSIX sockets) | ✅ | Stable server, 0 crashes across 20+ request test |
+| 60s non-streaming timeout | ✅ | 504 Gateway Timeout instead of infinite wait |
 
 ### Cache Sharing Speedup
 
-| Scenario | Latenza | Note |
-|----------|---------|------|
-| Cold (nessuna cache) | 227ms | Prefill completo |
-| Warm (prefisso in cache, delta diverso) | 194ms | **1.17x speedup** — solo delta calcolato |
-| Full cache hit (prompt identico) | 228ms | Stessa latenza: limitata da generate, non prefill |
+| Scenario | Latency | Notes |
+|----------|---------|-------|
+| Cold (no cache) | 227ms | Full prefill |
+| Warm (prefix in cache, different delta) | 194ms | **1.17× speedup** — only delta computed |
+| Full cache hit (identical prompt) | 228ms | Same latency: bottleneck is generation, not prefill |
 
 ### Parallel Prefill Speedup
 
 | Mode | N=4 total wall-time | Throughput |
 |------|---------------------|------------|
 | Sequential | 577ms | 6.9 req/s |
-| Parallel (parallel prefill) | 437ms | **9.2 req/s (1.32x)** |
+| Parallel (parallel prefill) | 437ms | **9.2 req/s (1.32×)** |
 
-Il guadagno cresce con prompt più lunghi: tutti i delta vengono raggruppati in un solo `llama_decode`.
+The speedup scales with prompt length: all deltas are grouped into a single `llama_decode` call.
 
 ---
 
 ## Bug Fix: Full Cache Hit (v2)
 
-**Problema identificato:** Quando una richiesta aveva un prefisso in cache al 100%, il server chiamava `decode_single(last_tok, seq_id, cached_pos - 1)` — una posizione già occupata nel KV cache. `llama_decode` restituiva `-1` e tutte le richieste successive alla prima fallissero con `[ERROR: prefill failed]`.
+**Problem identified:** When a request had a 100% cached prefix, the server called `decode_single(last_tok, seq_id, cached_pos - 1)` — a position already occupied in the KV cache. `llama_decode` returned `-1` and all requests after the first failed with `[ERROR: prefill failed]`.
 
-**Root cause:** Dopo `memory_seq_cp(src, dst, 0, -1)` + `memory_seq_rm(dst, cached_pos, -1)`, la nuova sequenza ha posizioni `[0..cached_pos-1]`. Decodificare a `cached_pos-1` è un conflitto; bisogna decodificare a `cached_pos` (la prossima posizione libera).
+**Root cause:** After `memory_seq_cp(src, dst, 0, -1)` + `memory_seq_rm(dst, cached_pos, -1)`, the new sequence holds positions `[0..cached_pos-1]`. Decoding at `cached_pos-1` is a conflict; the correct next free position is `cached_pos`.
 
-**Fix applicato** (`src/server.cpp`, `prefill_one()`):
+**Fix applied** (`src/server.cpp`, `prefill_one()`):
 ```cpp
-// PRIMA (bug):
+// BEFORE (bug):
 ok = bridge_.decode_single(last_tok, seq_id, cached_pos - 1);
-pos = cached_pos;  // sbagliato
+pos = cached_pos;  // wrong
 
-// DOPO (fix):
+// AFTER (fix):
 ok = bridge_.decode_single(last_tok, seq_id, cached_pos);  // next free position
 decode_end_pos = cached_pos + 1;
 pos = decode_end_pos;
 ```
 
-**Validazione:** 3 richieste identiche back-to-back tutte rispondono correttamente ✅
+**Validation:** 3 identical back-to-back requests all respond correctly ✅
 
 ---
 
 ## Bug Fix: Worker Thread Crash Safety (v2)
 
-**Problema:** Se `allocate_seq_id()` lancia `std::runtime_error` (pool esaurito), l'eccezione non catturata nel thread worker causava `std::terminate()` → processo morto.
+**Problem:** If `allocate_seq_id()` threw `std::runtime_error` (pool exhausted), the uncaught exception in the worker thread caused `std::terminate()` → process killed.
 
-**Fix:** Aggiunto try/catch attorno a ogni `prefill_one()` call e un safety net sull'intero loop `run()`. Il server sopravvive all'esaurimento delle risorse e risponde con `[ERROR: resource exhausted]` al client invece di crashare.
+**Fix:** Added try/catch around every `prefill_one()` call and a safety net on the entire `run()` loop. The server survives resource exhaustion and responds with `[ERROR: resource exhausted]` to the client instead of crashing.
 
 ---
 
 ## Benchmark 1 — KV Cache Sharing Speedup
 
-4 richieste con shared prefix lungo (~165 token), query diverse.
+4 requests with a long shared prefix (~165 tokens), different queries.
 
 | Query | Cold (ms) | Hit (ms) | Speedup |
-|-------|-----------|---------|---------|
-| "What is a red-black tree?" | 116 | 86 | **1.34x** |
-| "What is a hash map?" | 98 | 98 | 1.01x |
-| "What is dynamic programming?" | 96 | 93 | 1.03x |
-| "What is memoization?" | 100 | 91 | 1.10x |
-| **Media** | **102** | **92** | **1.12x** |
+|-------|-----------|----------|---------|
+| "What is a red-black tree?" | 116 | 86 | **1.34×** |
+| "What is a hash map?" | 98 | 98 | 1.01× |
+| "What is dynamic programming?" | 96 | 93 | 1.03× |
+| "What is memoization?" | 100 | 91 | 1.10× |
+| **Average** | **102** | **92** | **1.12×** |
 
-**Interpretazione:**  
-Lo speedup medio è 1.12x su questo modello piccolo. Il beneficio cresce proporzionalmente con la lunghezza del system prompt e le dimensioni del modello. Per un 7B Q4 con system prompt da 1000 token, il risparmio atteso è **4-8x** (il prefill è O(n²) mentre la copia KV è O(1)).
+**Interpretation:**
+Average speedup is 1.12× on this small model. The benefit scales with system prompt length and model size. For a 7B Q4 model with a 1000-token system prompt, the expected saving is **4–8×** (prefill is O(n²) while KV copy is O(1)).
 
 ---
 
 ## Benchmark 2 — Multi-Agent Concurrent Throughput
 
-N agenti con domande diverse inviate in parallelo simultaneamente.
+N agents sending different questions simultaneously in parallel.
 
-| N agenti | Wall time (ms) | Avg latency (ms) | Throughput (req/s) | Errori |
+| N agents | Wall time (ms) | Avg latency (ms) | Throughput (req/s) | Errors |
 |----------|---------------|-----------------|-------------------|--------|
 | 1 | 77 | 77 | 13.0 | 0 ✅ |
 | 2 | 156 | 155 | 12.9 | 0 ✅ |
@@ -115,12 +115,12 @@ N agenti con domande diverse inviate in parallelo simultaneamente.
 | 6 | 384 | 329 | **15.6** | 0 ✅ |
 | 8 | 487 | 425 | 14.4 | 1 ⚠️ |
 
-**Nota N=8:** Con max_sequences=16, 8 agenti attivi + canonical cache entries possono saturare il pool. 1 errore graceful (no crash server) — il client riceve `[ERROR: resource exhausted]` invece di una connessione interrotta.
+**Note N=8:** With max_sequences=16, 8 active agents + canonical cache entries can saturate the pool. 1 graceful error (no server crash) — the client receives `[ERROR: resource exhausted]` instead of a broken connection.
 
-**Batch decode in azione:**  
+**Batch decode in action:**
 ```
-Prefill phase: seq[0] → seq[1] → seq[2] → seq[3] → seq[4] → seq[5]  (sequenziale, delta-only)
-Autoregressive step 1: llama_decode({tok0, tok1, tok2, tok3, tok4, tok5})  ← 1 GPU call per 6 seq!
+Prefill phase: seq[0] → seq[1] → seq[2] → seq[3] → seq[4] → seq[5]  (sequential, delta-only)
+Autoregressive step 1: llama_decode({tok0, tok1, tok2, tok3, tok4, tok5})  ← 1 GPU call for 6 seqs!
 Autoregressive step 2: llama_decode({tok0, tok1, tok2, tok3, tok4, tok5})
 ...
 ```
@@ -129,21 +129,21 @@ Autoregressive step 2: llama_decode({tok0, tok1, tok2, tok3, tok4, tok5})
 
 ## Benchmark 3 — Streaming TTFT
 
-3 richieste streaming consecutive.
+3 consecutive streaming requests.
 
 | Run | TTFT (ms) |
 |-----|-----------|
 | 1 | 1 |
 | 2 | 1 |
 | 3 | 1 |
-| **Media** | **1 ms** |
+| **Average** | **1 ms** |
 
-- Header SSE `200 OK` inviato **prima** di enqueue la richiesta  
-- Keepalive ogni 2s: nessun timeout proxy durante Metal JIT
+- SSE header `200 OK` sent **before** enqueuing the request
+- Keepalive every 2s: no proxy timeout during Metal JIT compilation
 
 ---
 
-## Benchmark 4 — Chat Template Multi-turn
+## Benchmark 4 — Multi-Turn Chat Template
 
 ```json
 [
@@ -153,61 +153,61 @@ Autoregressive step 2: llama_decode({tok0, tok1, tok2, tok3, tok4, tok5})
 ]
 ```
 
-**Risposta:** `"Your name is Alice."` ✅  
-**Meccanismo:** `llama_model_chat_template(model, nullptr)` → template Jinja embedded nel GGUF.
+**Response:** `"Your name is Alice."` ✅
+**Mechanism:** `llama_model_chat_template(model, nullptr)` → Jinja template embedded in GGUF.
 
 ---
 
-## Architettura: Prima vs Dopo
+## Architecture: Before vs After
 
-### Prima (server originale)
+### Before (original server)
 ```
 Request A → prefill(system+question) → generate  ← 149 token prefill
-Request B → prefill(system+question) → generate  ← 149 token RICALCOLATI
-Request C → prefill(system+question) → generate  ← 149 token RICALCOLATI
-GPU steps: seq_A + seq_B + seq_C  (sequenziale)
+Request B → prefill(system+question) → generate  ← 149 tokens RECOMPUTED
+Request C → prefill(system+question) → generate  ← 149 tokens RECOMPUTED
+GPU steps: seq_A + seq_B + seq_C  (sequential)
 ```
 
-### Dopo (RadixForge v2)
+### After (RadixForge v2)
 ```
-Request A → prefill(question_delta=10tok) → batch_join  ← 139 token da cache
-Request B → prefill(question_delta=12tok) → batch_join  ← 137 token da cache
-Request C → prefill(question_delta=8tok)  → batch_join  ← 141 token da cache
-GPU step 1: llama_decode({tokA, tokB, tokC})  ← 1 sola chiamata GPU
+Request A → prefill(question_delta=10tok) → batch_join  ← 139 tokens from cache
+Request B → prefill(question_delta=12tok) → batch_join  ← 137 tokens from cache
+Request C → prefill(question_delta=8tok)  → batch_join  ← 141 tokens from cache
+GPU step 1: llama_decode({tokA, tokB, tokC})  ← 1 GPU call for 3 sequences
 GPU step 2: llama_decode({tokA, tokB, tokC})
 ```
 
 ---
 
-## Scaling Atteso su Modelli Più Grandi
+## Expected Scaling on Larger Models
 
-| Modello | Prefill 1000-token cold | Con KV sharing | Speedup |
-|---------|------------------------|----------------|---------|
-| 0.5B Q4 | ~500ms | ~50ms | ~10x |
-| 7B Q4   | ~7s    | ~700ms | ~10x |
-| 13B Q4  | ~15s   | ~1.5s | ~10x |
-| 70B Q4  | ~90s   | ~9s   | ~10x |
+| Model | 1000-token cold prefill | With KV sharing | Speedup |
+|-------|------------------------|----------------|---------|
+| 0.5B Q4 | ~500ms | ~50ms | ~10× |
+| 7B Q4   | ~7s    | ~700ms | ~10× |
+| 13B Q4  | ~15s   | ~1.5s | ~10× |
+| 70B Q4  | ~90s   | ~9s   | ~10× |
 
-*Stime basate su performance lineare del prefill: O(n_tokens × n_params). La copia KV è O(1) in llama.cpp.*
-
----
-
-## Limitazioni Note
-
-1. **0.5B è troppo piccolo** per vedere speedup drammatici — i tempi di ~100ms sono dominati da overhead fisso (tokenizzazione, HTTP, enqueue/dequeue)
-2. **N=8 concurrent** con --max-seq 16 è al limite del pool. Usare `--max-seq 32` per carichi reali
-3. **Modelli GDN (Gated Delta Net)** potrebbero avere comportamenti diversi per `memory_seq_cp` — testati solo modelli Transformer standard
-4. **Il beneficio del KV sharing cresce con il system prompt**: sotto 100 token, lo speedup è marginale; sopra 500 token diventa significativo
+*Estimates based on linear prefill performance: O(n_tokens × n_params). KV copy is O(1) in llama.cpp.*
 
 ---
 
-## Conclusioni
+## Known Limitations
 
-RadixForge v2 implementa correttamente:
+1. **0.5B is too small** for dramatic speedups — ~100ms timings are dominated by fixed overhead (tokenization, HTTP, enqueue/dequeue)
+2. **N=8 concurrent** with `--max-seq 16` is at pool saturation. Use `--max-seq 32` for real workloads
+3. **GDN models (Gated Delta Net)** may behave differently for `memory_seq_cp` — only standard Transformer models tested
+4. **KV sharing benefit grows with system prompt length**: below 100 tokens, speedup is marginal; above 500 tokens, it becomes significant
 
-1. ✅ **KV cache sharing** — risparmio prefill proporzionale al prefisso comune (1.1-1.3x su 0.5B, 5-10x stimato su modelli reali)
-2. ✅ **Batch decode** — throughput multi-agente di 13-16 req/s stabile su N=1..6  
-3. ✅ **Full cache hit fix** — bug critico risolto, tutte le richieste cache-hit ora funzionano
-4. ✅ **Exception safety** — worker thread sopravvive a esaurimento risorse, nessun crash server
-5. ✅ **SSE TTFT 1ms** — streaming immersivo anche sotto carico
-6. ✅ **Chat template nativo** — formattazione GGUF-embedded corretta per tutti i modelli
+---
+
+## Conclusions
+
+RadixForge v2 correctly implements:
+
+1. ✅ **KV cache sharing** — prefill savings proportional to common prefix (1.1–1.3× on 0.5B, 5–10× estimated on real models)
+2. ✅ **Batch decode** — multi-agent throughput of 13–16 req/s, stable for N=1..6
+3. ✅ **Full cache hit fix** — critical bug resolved, all cache-hit requests now work correctly
+4. ✅ **Exception safety** — worker thread survives resource exhaustion, no server crashes
+5. ✅ **SSE TTFT 1ms** — responsive streaming even under load
+6. ✅ **Native chat template** — correct GGUF-embedded formatting for all models

@@ -107,6 +107,12 @@ llama_seq_id KVMapper::allocate_seq_id() {
     if (free_seq_ids_.empty()) {
         throw std::runtime_error("No free seq_ids available after eviction");
     }
+    // Warn when pool is near saturation (below gc_watermark remaining)
+    int32_t remaining = static_cast<int32_t>(free_seq_ids_.size());
+    if (remaining <= (config_.max_sequences - config_.gc_watermark)) {
+        RF_WARN("kv_mapper", "Seq pool near saturation: %d/%d free slots remaining",
+                remaining, config_.max_sequences);
+    }
     llama_seq_id id = free_seq_ids_.front();
     free_seq_ids_.pop_front();
     return id;
@@ -136,6 +142,33 @@ void KVMapper::evict_one() {
 void KVMapper::defrag() {
     // Proactive GC every N requests keeps the pool healthy.
     gc_if_needed();
+}
+
+bool KVMapper::force_evict_seq(llama_seq_id target_seq) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    // Search all nodes for the target seq_id
+    std::vector<RadixNode*> stk = {tree_.root()};
+    RadixNode* owner = nullptr;
+    while (!stk.empty()) {
+        RadixNode* n = stk.back(); stk.pop_back();
+        if (n->seq_ids.count(target_seq)) { owner = n; break; }
+        for (auto& [k, c] : n->children) stk.push_back(c.get());
+    }
+
+    // Also check free_seq_ids — seq might already be freed
+    for (auto id : free_seq_ids_) {
+        if (id == target_seq) return false;  // already free, nothing to do
+    }
+
+    bridge_.memory_seq_rm(target_seq, 0, -1);
+    free_seq_ids_.push_back(target_seq);
+    metrics_.evictions.fetch_add(1, std::memory_order_relaxed);
+
+    if (owner) owner->seq_ids.erase(target_seq);
+
+    RF_INFO("kv_mapper", "Admin: force-evicted seq %d", target_seq);
+    return true;
 }
 
 } // namespace radixforge

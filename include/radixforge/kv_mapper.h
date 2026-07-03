@@ -48,6 +48,9 @@ public:
     // Release a physical seq_id back to the pool after generation is done.
     void release_sequence(llama_seq_id seq_id, RadixNode* node);
 
+    // Forcefully evict a specific seq_id (admin use only). Returns false if not found.
+    bool force_evict_seq(llama_seq_id seq_id);
+
     // Run proactive garbage collection (evict idle LRU sequences).
     void gc_if_needed();
 

@@ -194,4 +194,16 @@ void LlamaBridge::free_sampler(llama_sampler* sampler) {
     if (sampler) llama_sampler_free(sampler);
 }
 
+std::string LlamaBridge::model_name() const {
+    if (!model_) return "unknown";
+    char buf[256] = {};
+    // Try the standard GGUF general.name key first
+    int n = llama_model_meta_val_str(model_.get(), "general.name", buf, sizeof(buf));
+    if (n > 0) return std::string(buf, n);
+    // Fallback: basename of the model path
+    const std::string& p = config_.model_path;
+    auto pos = p.rfind('/');
+    return pos == std::string::npos ? p : p.substr(pos + 1);
+}
+
 } // namespace radixforge

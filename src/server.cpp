@@ -377,6 +377,19 @@ Server::Server(const Config& config, InferenceWorker& worker,
                KVMapper& mapper, RadixTree& tree)
     : config_(config), worker_(worker), mapper_(mapper), tree_(tree) {}
 
+// Returns true if the request passes admin auth (or auth is disabled).
+static bool check_admin_auth(const Config& config,
+                              const httplib::Request& req,
+                              httplib::Response& res) {
+    if (config.admin_token.empty()) return true;
+    const std::string expected = "Bearer " + config.admin_token;
+    if (req.get_header_value("Authorization") == expected) return true;
+    res.status = 401;
+    res.set_content("{\"error\":\"Unauthorized — set Authorization: Bearer <admin-token>\"}",
+                    "application/json");
+    return false;
+}
+
 static void parse_request_body(const httplib::Request& req_http,
                                InferenceRequest& req,
                                const Config& config) {
@@ -451,19 +464,28 @@ void Server::start() {
         res.status = 204;
     });
 
-    // Health check
+    // Health check — includes model name and pool status
     svr.Get("/health", [this](const httplib::Request&, httplib::Response& res) {
         size_t pending = worker_.pending_count();
         int32_t active_seqs = worker_.active_sequence_count();
         res.set_header("Access-Control-Allow-Origin", "*");
-        res.set_content(
-            "{\"status\":\"ok\",\"active_sequences\":" + std::to_string(active_seqs) +
-            ",\"pending_requests\":" + std::to_string(pending) + "}",
-            "application/json");
+        const CacheMetrics& m = mapper_.metrics();
+        uint64_t total = m.total_requests.load(std::memory_order_relaxed);
+        uint64_t hits  = m.hits.load(std::memory_order_relaxed);
+        double hit_rate = total > 0 ? static_cast<double>(hits) / total : 0.0;
+        char buf[512];
+        snprintf(buf, sizeof(buf),
+            "{\"status\":\"ok\",\"model\":\"%s\","
+            "\"active_sequences\":%d,\"pending_requests\":%zu,"
+            "\"cache_hit_rate\":%.4f}",
+            config_.model_path.substr(config_.model_path.rfind('/') + 1).c_str(),
+            active_seqs, pending, hit_rate);
+        res.set_content(buf, "application/json");
     });
 
-    // /admin/stats — cache metrics and worker state
-    svr.Get("/admin/stats", [this](const httplib::Request&, httplib::Response& res) {
+    // /admin/stats — cache metrics and worker state (auth required if admin_token set)
+    svr.Get("/admin/stats", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!check_admin_auth(config_, req, res)) return;
         const CacheMetrics& m = mapper_.metrics();
         uint64_t hits  = m.hits.load(std::memory_order_relaxed);
         uint64_t total = m.total_requests.load(std::memory_order_relaxed);
@@ -483,10 +505,32 @@ void Server::start() {
         res.set_content(buf, "application/json");
     });
 
-    // /admin/tree/dump — radix tree structure as JSON
-    svr.Get("/admin/tree/dump", [this](const httplib::Request&, httplib::Response& res) {
+    // /admin/tree/dump — radix tree structure as JSON (auth required if admin_token set)
+    svr.Get("/admin/tree/dump", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!check_admin_auth(config_, req, res)) return;
         res.set_header("Access-Control-Allow-Origin", "*");
         res.set_content(tree_.to_json(), "application/json");
+    });
+
+    // /admin/seq/:id — force-evict a specific physical sequence (auth required)
+    svr.Delete(R"(/admin/seq/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
+        if (!check_admin_auth(config_, req, res)) return;
+        llama_seq_id target;
+        try { target = static_cast<llama_seq_id>(std::stoi(req.matches[1])); }
+        catch (...) {
+            res.status = 400;
+            res.set_content("{\"error\":\"invalid seq_id\"}", "application/json");
+            return;
+        }
+        bool ok = mapper_.force_evict_seq(target);
+        res.set_header("Access-Control-Allow-Origin", "*");
+        if (ok) {
+            res.set_content("{\"status\":\"evicted\",\"seq_id\":" +
+                            std::to_string(target) + "}", "application/json");
+        } else {
+            res.status = 404;
+            res.set_content("{\"error\":\"seq_id not found or already free\"}", "application/json");
+        }
     });
 
     // Chat completions (non-streaming)

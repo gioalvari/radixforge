@@ -20,13 +20,15 @@ static void print_usage(const char* prog) {
     fprintf(stderr,
         "Usage: %s -m <model.gguf> [options]\n"
         "Options:\n"
-        "  -m, --model <path>     Path to GGUF model (required)\n"
-        "  -c, --ctx-size <n>     Context size (default: 32768)\n"
-        "  -b, --batch-size <n>   Max decode batch size (default: 2048)\n"
-        "  -ngl, --n-gpu-layers   GPU layers to offload (default: 99)\n"
-        "  --host <addr>          Listen address (default: 127.0.0.1)\n"
-        "  --port <n>             Listen port (default: 8400)\n"
-        "  --max-seq <n>          Max concurrent sequences (default: 32)\n"
+        "  -m, --model <path>         Path to GGUF model (required)\n"
+        "  -c, --ctx-size <n>         Context size (default: 32768)\n"
+        "  -b, --batch-size <n>       Max decode batch size (default: 2048)\n"
+        "  -ngl, --n-gpu-layers       GPU layers to offload (default: 99)\n"
+        "  --host <addr>              Listen address (default: 127.0.0.1)\n"
+        "  --port <n>                 Listen port (default: 8400)\n"
+        "  --max-seq <n>              Max concurrent sequences (default: 32)\n"
+        "  --admin-token <token>      Bearer token for /admin/* endpoints (default: none)\n"
+        "  --log-level <level>        Log level: debug|info|warn|error (default: info)\n"
         "\n", prog);
 }
 
@@ -50,6 +52,10 @@ int main(int argc, char** argv) {
             config.max_sequences = std::atoi(argv[++i]);
         } else if ((arg == "-b" || arg == "--batch-size") && i + 1 < argc) {
             config.n_batch = std::atoi(argv[++i]);
+        } else if (arg == "--admin-token" && i + 1 < argc) {
+            config.admin_token = argv[++i];
+        } else if (arg == "--log-level" && i + 1 < argc) {
+            config.log_level = argv[++i];
         } else {
             print_usage(argv[0]);
             return 1;
@@ -63,6 +69,12 @@ int main(int argc, char** argv) {
 
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+
+    // Apply log level from config
+    if      (config.log_level == "debug") radixforge::set_log_level(radixforge::LogLevel::DEBUG);
+    else if (config.log_level == "warn")  radixforge::set_log_level(radixforge::LogLevel::WARN);
+    else if (config.log_level == "error") radixforge::set_log_level(radixforge::LogLevel::ERROR);
+    else                                   radixforge::set_log_level(radixforge::LogLevel::INFO);
 
     RF_INFO("main", "Loading model: %s", config.model_path.c_str());
     RF_INFO("main", "Context: %d tokens, GPU layers: %d, Max sequences: %d",

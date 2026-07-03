@@ -70,6 +70,7 @@ public:
 
     int32_t n_ctx() const;
     int32_t n_batch() const;
+    std::string model_name() const;  // human-readable model name from GGUF metadata
 
 private:
     void init_sampler(float temperature, float top_p);
