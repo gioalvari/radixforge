@@ -234,6 +234,30 @@ curl http://localhost:8400/v1/chat/completions -H "Content-Type: application/jso
 
 ---
 
+## Benchmark: 8 agents sharing a system prompt
+
+8 agents, identical ~1,500-token system prompt, 4 turns each, 32 output tokens,
+Qwen2.5-0.5B Q4_K_M on an Apple M4 Pro, 3 repetitions with a fresh server each
+(576 requests, 0 failures). Median time to first token:
+
+| Concurrency | Phase | llama-server (no cache) | llama-server (`--cache-reuse`) | RadixForge |
+| ---: | --- | ---: | ---: | ---: |
+| 1 | first turn, other agents | 244 ms | 27 ms | **17 ms** |
+| 1 | follow-up turns | 276 ms | 58 ms | **21 ms** |
+| 8 | first turn, all agents at once | 1,608 ms | 1,857 ms | **288 ms** |
+| 8 | follow-up turns | 2,157 ms | 112 ms | **108 ms** |
+
+At concurrency 8 RadixForge completes the workload in 2.98 s vs 4.08 s for
+llama-server with prompt caching (10.7 vs 7.8 requests/s). The gap comes from
+concurrent fan-out: llama-server's prompt cache is per slot, so agents that land
+on different slots each recompute the shared prefix; RadixForge computes it
+once. Decode is not faster (no continuous batching yet).
+
+Harness, methodology and full results:
+[local-llm-bench `prefix-sharing`](https://github.com/gioalvari/local-llm-bench).
+
+---
+
 ## Project structure
 
 ```
@@ -269,11 +293,11 @@ Apple Silicon has no hardware GPU multi-tenancy (unlike NVIDIA with MIG). If you
 
 ### Why does `seq_cp` always copy the full buffer?
 
-The `llama_memory_seq_cp` API in llama.cpp (v0.15+) only supports partial copies within the same "stream" (contiguous physical sequence). For cross-stream copies — which occur when src and dst belong to different channels — it requires `p0=0, p1=-1` (full copy). RadixForge works around this by copying everything and then calling `llama_memory_seq_rm(dst, matched_tokens, -1)` to discard the excess tokens.
+It does not. RadixForge enables llama.cpp's unified KV cache (`kv_unified=true`), placing every `seq_id` in one shared stream. In this mode `llama_memory_seq_cp(src, dst, 0, matched_tokens)` is a zero-copy metadata operation: it tags the prefix's existing KV cells with `dst`. Each sequence can use the complete context window, and only the matched prefix is tagged—there is no full-buffer copy or follow-up `seq_rm` trim.
 
 ### LRU Eviction
 
-When the physical `seq_id` pool is exhausted, `KVMapper::evict_one()` finds the Radix Tree leaf node with the oldest `last_access_tick` and calls `llama_memory_seq_rm` to free the VRAM. The node is removed from the tree. The next request matching that prefix recomputes it from scratch.
+When the physical `seq_id` pool is exhausted, `KVMapper::evict_one()` finds the idle Radix Tree node with the oldest `last_access_tick` and calls `llama_memory_seq_rm` to free the VRAM. Internal prefix nodes retain their logical structure, while their physical cache entry is removed; the next request can still match the prefix and recompute any uncached tokens.
 
 ### `find_covering_seq_id()`
 
@@ -287,6 +311,8 @@ After a node split, the `seq_ids` **stay on the prefix (parent) node** — the s
 - **Single model** — the server loads one GGUF model at startup. Serving different models in parallel requires separate instances on different ports.
 - **Fixed chat template** — uses ChatML (`<|im_start|>role\ncontent<|im_end|>`). Models with different templates (Llama-3, Mistral) may produce degraded quality.
 - **No tool use / function calling** — text completions only.
+- **Static batching** — requests that arrive while a batch is generating wait for it to finish; there is no continuous batching yet.
+- **Cooperative cancellation** — a disconnected client's request still runs to completion before its sequence is released.
 
 ---
 
