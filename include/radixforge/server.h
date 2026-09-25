@@ -45,14 +45,19 @@ struct InferenceRequest {
     // non-null only for the final callback.
     std::function<void(const std::string& token, bool is_last,
                        const InferenceStats* stats)> on_token;
+    // Returns true once the HTTP peer has disconnected or a synchronous request
+    // has timed out. The worker polls it before admission and each decode step.
+    std::function<bool()> cancelled;
 };
 
-// Internal prefill context — collected during the parallel prefill phase
+// Internal prefill context.  It remains pending until every prompt token has
+// been submitted successfully, allowing long prompts to be chunked across
+// fused decode steps.
 struct PrefillCtx {
     InferenceRequest req;
     KVMapper::PrepareResult prep;
     std::vector<llama_token> tokens;    // full prompt tokens (for full-cache-hit ref)
-    int32_t delta_start = 0;            // index into tokens[] where delta begins
+    int32_t delta_start = 0;            // number of delta tokens submitted
     InferenceStats stats;
 };
 
@@ -66,16 +71,18 @@ struct ActiveSeq {
     int32_t remaining = 0;     // remaining tokens to generate (decremented each step)
     llama_sampler* sampler = nullptr;
     bool done = false;
+    bool notify_on_retire = false;
+    bool generation_started = false;
     InferenceStats stats;
-    std::chrono::steady_clock::time_point generation_started;
+    std::chrono::steady_clock::time_point generation_started_at;
 };
 
-// Single-threaded inference worker that processes requests from a queue.
-// Prefill is now parallelised: all pending requests have their delta tokens
-// batched into a single llama_decode call before entering the autoregressive loop.
+// Single-threaded inference worker with continuous batching. New requests are
+// admitted between one-token decode steps and completed sequences leave at once.
 class InferenceWorker {
 public:
-    InferenceWorker(LlamaBridge& bridge, RadixTree& tree, KVMapper& mapper);
+    InferenceWorker(LlamaBridge& bridge, RadixTree& tree, KVMapper& mapper,
+                    const Config& config);
     ~InferenceWorker();
 
     void start();
@@ -83,6 +90,7 @@ public:
     void enqueue(InferenceRequest req);
     size_t pending_count() const;
     int32_t active_sequence_count() const;
+    int32_t generating_sequence_count() const;
 
 private:
     LlamaBridge& bridge_;
@@ -95,21 +103,33 @@ private:
     std::atomic<bool> running_{false};
     std::thread worker_thread_;
     uint64_t request_count_ = 0;
+    std::atomic<int32_t> generating_sequences_{0};
+    int32_t admit_window_ms_ = 2;
+    std::atomic<uint64_t> decode_steps_{0};
+    std::atomic<uint64_t> prefill_tokens_{0};
+    std::atomic<uint64_t> prefill_calls_{0};
 
     void run();
     // Step 1: tokenise + KV-prepare every request, build PrefillCtx list.
     //         Does NOT call llama_decode yet.
     std::vector<PrefillCtx> prepare_all(std::vector<InferenceRequest>& reqs,
-                                        std::vector<InferenceRequest>* deferred,
-                                        bool allow_deferral = true);
+                                         std::vector<InferenceRequest>* deferred,
+                                         std::vector<InferenceRequest>* queued,
+                                         int32_t* prompt_budget,
+                                         bool allow_deferral = true);
     void defer_to_front(std::vector<InferenceRequest>& deferred);
-    // Step 2: submit all delta tokens in one llama_decode batch.
-    //         Returns active seqs ready for the autoregressive loop.
-    std::vector<ActiveSeq> prefill_batch(std::vector<PrefillCtx>& ctxs);
-    // Internal: run one sub-batch [from, to) — called by prefill_batch for chunking.
-    std::vector<ActiveSeq> prefill_range(std::vector<PrefillCtx>& ctxs, size_t from, size_t to);
-    // Step 3: batched autoregressive decode loop until all seqs are done.
-    void run_batch(std::vector<ActiveSeq>& seqs);
+    // Run one fused llama_decode call: queued generation tokens plus as many
+    // prompt tokens as fit in the remaining n_batch capacity.
+    void fused_step(std::vector<ActiveSeq>& seqs,
+                    std::vector<PrefillCtx>& prefilling,
+                    size_t newly_admitted);
+    void retire(ActiveSeq& seq, bool notify_client);
+    static bool is_cancelled(const InferenceRequest& req);
+
+public:
+    uint64_t decode_steps() const { return decode_steps_.load(std::memory_order_relaxed); }
+    uint64_t prefill_tokens() const { return prefill_tokens_.load(std::memory_order_relaxed); }
+    uint64_t prefill_calls() const { return prefill_calls_.load(std::memory_order_relaxed); }
 };
 
 // HTTP server using cpp-httplib (OpenAI-compatible /v1/chat/completions).

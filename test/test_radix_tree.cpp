@@ -210,6 +210,19 @@ static void test_pending_sequences_are_not_cache_sources() {
           "failed pending sequence is never retained as a cache source");
 }
 
+static void test_active_references_are_not_evictable() {
+    printf("\n[test_active_references_are_not_evictable]\n");
+    radixforge::RadixTree tree;
+    auto active = tree.insert(tok({4, 5, 6}));
+    tree.register_seq_id(active.node, 71, 3);
+    tree.mark_seq_id_ready(active.node, 71);
+    CHECK(tree.find_eviction_candidates(1).empty(),
+          "referenced sequence is not an eviction candidate");
+    tree.release(active.node);
+    CHECK(tree.find_eviction_candidates(1).size() == 1,
+          "released sequence becomes an eviction candidate");
+}
+
 static void test_to_json() {
     printf("\n[test_to_json]\n");
     radixforge::RadixTree tree;
@@ -241,6 +254,7 @@ int main() {
     test_eviction_candidates();
     test_split_prefix_is_evictable();
     test_pending_sequences_are_not_cache_sources();
+    test_active_references_are_not_evictable();
     test_to_json();
 
     printf("\n─────────────────────────────\n");

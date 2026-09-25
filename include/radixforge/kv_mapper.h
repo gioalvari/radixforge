@@ -8,9 +8,15 @@
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <stdexcept>
 #include <vector>
 
 namespace radixforge {
+
+class SequenceCapacityExhausted : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 // Snapshot of cache performance counters. All fields are atomics so they
 // can be read from the HTTP thread while the worker updates them.
@@ -64,6 +70,10 @@ public:
     // Defragment the underlying KV cache (also runs gc_if_needed).
     void defrag();
 
+    // Evict an idle cached sequence when available. Referenced nodes (active or
+    // pending requests) are excluded by RadixTree's ref_count check.
+    bool evict_idle_sequence();
+
     // Read-only access to cache performance counters.
     const CacheMetrics& metrics() const { return metrics_; }
 
@@ -79,7 +89,7 @@ private:
     CacheMetrics metrics_;
 
     llama_seq_id allocate_seq_id_locked();
-    void evict_one_locked();
+    bool evict_one_locked();
 };
 
 } // namespace radixforge

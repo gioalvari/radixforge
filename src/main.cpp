@@ -5,6 +5,7 @@
 #include "radixforge/radix_tree.h"
 #include "radixforge/server.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <csignal>
@@ -27,6 +28,7 @@ static void print_usage(const char* prog) {
         "  --host <addr>              Listen address (default: 127.0.0.1)\n"
         "  --port <n>                 Listen port (default: 8400)\n"
         "  --max-seq <n>              Max concurrent sequences (default: 32)\n"
+        "  --admit-window-ms <n>      Idle request coalescing window (default: 2)\n"
         "  --admin-token <token>      Bearer token for /admin/* endpoints (default: none)\n"
         "  --log-level <level>        Log level: debug|info|warn|error (default: info)\n"
         "\n", prog);
@@ -50,6 +52,8 @@ int main(int argc, char** argv) {
             config.port = std::atoi(argv[++i]);
         } else if (arg == "--max-seq" && i + 1 < argc) {
             config.max_sequences = std::atoi(argv[++i]);
+        } else if (arg == "--admit-window-ms" && i + 1 < argc) {
+            config.admit_window_ms = std::max(0, std::atoi(argv[++i]));
         } else if ((arg == "-b" || arg == "--batch-size") && i + 1 < argc) {
             config.n_batch = std::atoi(argv[++i]);
         } else if (arg == "--admin-token" && i + 1 < argc) {
@@ -91,7 +95,7 @@ int main(int argc, char** argv) {
     radixforge::KVMapper mapper(bridge, tree, config);
 
     // Phase 4: Start inference worker and HTTP server
-    radixforge::InferenceWorker worker(bridge, tree, mapper);
+    radixforge::InferenceWorker worker(bridge, tree, mapper, config);
     worker.start();
 
     radixforge::Server server(config, worker, mapper, tree);

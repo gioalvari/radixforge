@@ -14,8 +14,10 @@ namespace radixforge {
 
 // --- InferenceWorker ---
 
-InferenceWorker::InferenceWorker(LlamaBridge& bridge, RadixTree& tree, KVMapper& mapper)
-    : bridge_(bridge), tree_(tree), mapper_(mapper) {}
+InferenceWorker::InferenceWorker(LlamaBridge& bridge, RadixTree& tree,
+                                 KVMapper& mapper, const Config& config)
+    : bridge_(bridge), tree_(tree), mapper_(mapper),
+      admit_window_ms_(config.admit_window_ms) {}
 
 InferenceWorker::~InferenceWorker() { stop(); }
 
@@ -47,16 +49,27 @@ int32_t InferenceWorker::active_sequence_count() const {
     return tree_.active_sequence_count();
 }
 
+int32_t InferenceWorker::generating_sequence_count() const {
+    return generating_sequences_.load(std::memory_order_relaxed);
+}
+
+bool InferenceWorker::is_cancelled(const InferenceRequest& req) {
+    return req.cancelled && req.cancelled();
+}
+
 // ── Phase 1: tokenise + KV-prepare every request ─────────────────────────────
 // No llama_decode yet — just builds PrefillCtx for each request.
 std::vector<PrefillCtx> InferenceWorker::prepare_all(
     std::vector<InferenceRequest>& reqs, std::vector<InferenceRequest>* deferred,
+    std::vector<InferenceRequest>* queued, int32_t* prompt_budget,
     bool allow_deferral) {
 
     std::vector<PrefillCtx> ctxs;
     ctxs.reserve(reqs.size());
 
-    for (auto& req : reqs) {
+    for (size_t req_index = 0; req_index < reqs.size(); ++req_index) {
+        auto& req = reqs[req_index];
+        if (is_cancelled(req)) continue;
         // Resolve chat template
         std::string prompt = req.prompt;
         if (prompt.empty() && !req.messages.empty()) {
@@ -88,9 +101,7 @@ std::vector<PrefillCtx> InferenceWorker::prepare_all(
         const PrefixAvailability availability = mapper_.inspect_prefix(tokens);
         const int32_t pending_advantage =
             availability.pending_tokens - availability.ready_tokens;
-        if (allow_deferral && pending_advantage > 0 &&
-            (pending_advantage >= 64 || pending_advantage * 2 >
-                                            static_cast<int32_t>(tokens.size()))) {
+        if (allow_deferral && pending_advantage > 0) {
             // Do not insert/allocate this request yet: the leading pending
             // request will become ready (or be released on failure) this run.
             // This prevents a copy from empty KV while retaining prefix sharing.
@@ -104,6 +115,16 @@ std::vector<PrefillCtx> InferenceWorker::prepare_all(
 
         try {
             ctx.prep  = mapper_.prepare_sequence(ctx.tokens);
+        } catch (const SequenceCapacityExhausted&) {
+            if (queued) {
+                queued->push_back(std::move(ctx.req));
+                for (++req_index; req_index < reqs.size(); ++req_index) {
+                    if (!is_cancelled(reqs[req_index])) {
+                        queued->push_back(std::move(reqs[req_index]));
+                    }
+                }
+            }
+            break;
         } catch (const std::exception& e) {
             RF_ERROR("worker", "prepare_sequence failed: %s", e.what());
             if (ctx.req.on_token) {
@@ -112,7 +133,25 @@ std::vector<PrefillCtx> InferenceWorker::prepare_all(
             continue;
         }
 
-        ctx.delta_start = ctx.prep.cached_pos;
+        const int32_t prompt_tokens = !ctx.prep.delta.empty()
+            ? static_cast<int32_t>(ctx.prep.delta.size())
+            : (ctx.prep.cached_pos > 0 ? 1 : 0);
+        if (prompt_budget && !ctxs.empty() &&
+            prompt_tokens > *prompt_budget) {
+            mapper_.release_sequence(ctx.prep.seq_id, ctx.prep.leaf_node);
+            tree_.release(ctx.prep.leaf_node);
+            if (queued) {
+                queued->push_back(std::move(ctx.req));
+                for (++req_index; req_index < reqs.size(); ++req_index) {
+                    if (!is_cancelled(reqs[req_index])) {
+                        queued->push_back(std::move(reqs[req_index]));
+                    }
+                }
+            }
+            break;
+        }
+        if (prompt_budget) *prompt_budget -= std::min(prompt_tokens, *prompt_budget);
+        ctx.delta_start = 0;
         ctx.stats.prompt_n = static_cast<int32_t>(ctx.prep.delta.size());
         ctx.stats.cache_n = ctx.prep.cached_pos;
         ctx.stats.prompt_tokens = static_cast<int32_t>(ctx.tokens.size());
@@ -134,349 +173,312 @@ void InferenceWorker::defer_to_front(std::vector<InferenceRequest>& deferred) {
     queue_cv_.notify_one();
 }
 
-// ── Phase 2: parallel prefill ────────────────────────────────────────────────
-// Build one llama_batch containing ALL delta tokens from all requests,
-// each tagged with its own seq_id and position. One GPU call covers everything.
-// If the total token count exceeds n_batch, ctxs are split into sub-batches.
-std::vector<ActiveSeq> InferenceWorker::prefill_batch(
-    std::vector<PrefillCtx>& ctxs) {
-
-    std::vector<ActiveSeq> all_active;
-    if (ctxs.empty()) return all_active;
-
-    const int32_t max_batch = bridge_.n_batch();
-
-    // Partition ctxs into sub-batches, each fitting within max_batch tokens.
-    size_t start = 0;
-    while (start < ctxs.size()) {
-        int32_t sub_total = 0;
-        size_t end = start;
-        while (end < ctxs.size()) {
-            const auto& ctx = ctxs[end];
-            int32_t tc = !ctx.prep.delta.empty()
-                ? (int32_t)ctx.prep.delta.size()
-                : (ctx.prep.cached_pos > 0 ? 1 : 0);
-            if (tc == 0) { end++; continue; }
-            if (end > start && sub_total + tc > max_batch) break;
-            sub_total += tc;
-            end++;
-        }
-        if (end == start) end = start + 1;  // at least one ctx per sub-batch
-
-        auto sub = prefill_range(ctxs, start, end);
-        for (auto& s : sub) all_active.push_back(std::move(s));
-        start = end;
+// ── Fused continuous-batch step ─────────────────────────────────────────────
+void InferenceWorker::retire(ActiveSeq& seq, bool notify_client) {
+    if (notify_client && seq.req.on_token && !is_cancelled(seq.req)) {
+        const auto finished = std::chrono::steady_clock::now();
+        seq.stats.predicted_ms = std::chrono::duration<double, std::milli>(
+            finished - seq.generation_started_at).count();
+        seq.req.on_token("", true, &seq.stats);
     }
-    return all_active;
+    LlamaBridge::free_sampler(seq.sampler);
+    mapper_.release_sequence(seq.seq_id, seq.leaf_node);
+    tree_.release(seq.leaf_node);
 }
 
-std::vector<ActiveSeq> InferenceWorker::prefill_range(
-    std::vector<PrefillCtx>& ctxs, size_t from, size_t to) {
+void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
+                                 std::vector<PrefillCtx>& prefilling,
+                                 size_t newly_admitted) {
+    for (auto& seq : seqs) {
+        if (is_cancelled(seq.req)) seq.done = true;
+    }
+    auto cancelled = std::remove_if(seqs.begin(), seqs.end(), [this](ActiveSeq& seq) {
+        if (!seq.done) return false;
+        RF_INFO("worker", "Retiring cancelled sequence %d", seq.seq_id);
+        retire(seq, false);
+        return true;
+    });
+    seqs.erase(cancelled, seqs.end());
 
-    std::vector<ActiveSeq> active;
-    if (from >= to) return active;
+    auto abandoned = std::remove_if(prefilling.begin(), prefilling.end(), [this](PrefillCtx& ctx) {
+        if (!is_cancelled(ctx.req)) return false;
+        mapper_.release_sequence(ctx.prep.seq_id, ctx.prep.leaf_node);
+        tree_.release(ctx.prep.leaf_node);
+        return true;
+    });
+    prefilling.erase(abandoned, prefilling.end());
 
-    // --- Delta sequences: use prep.delta tokens ---
-    // --- Full-cache-hit sequences: one re-decode token ---
+    const int decoding = static_cast<int>(seqs.size());
+    const int32_t capacity = bridge_.n_batch() - decoding;
+    if (decoding == 0 && (prefilling.empty() || capacity <= 0)) return;
 
-    // Count total batch size for this sub-range
-    int32_t total_tokens = 0;
-    for (size_t ci = from; ci < to; ci++) {
-        const auto& ctx = ctxs[ci];
-        if (!ctx.prep.delta.empty()) {
-            total_tokens += (int32_t)ctx.prep.delta.size();
-        } else if (ctx.prep.cached_pos > 0) {
-            total_tokens += 1;  // full-cache-hit: one re-decode token
-        }
-        // cached_pos == 0 && delta empty → empty prompt, skip
+    llama_batch batch = llama_batch_init(bridge_.n_batch(), 0, 1);
+    int batch_idx = 0;
+    for (int i = 0; i < decoding; ++i) {
+        batch.token[batch_idx] = seqs[i].next_token;
+        batch.pos[batch_idx] = seqs[i].pos;
+        batch.n_seq_id[batch_idx] = 1;
+        batch.seq_id[batch_idx][0] = seqs[i].seq_id;
+        batch.logits[batch_idx] = 1;
+        ++batch_idx;
     }
 
-    if (total_tokens == 0) return active;
-
-    llama_batch batch = llama_batch_init(total_tokens, 0, 1);
-    batch.n_tokens = total_tokens;
-
-    int32_t batch_idx = 0;
-    // track which batch index belongs to which ctx (for logit sampling)
-    // indexed relative to `from`
-    const size_t n_sub = to - from;
-    std::vector<int32_t> ctx_last_logit_idx(n_sub, -1);
-
-    for (size_t i = 0; i < n_sub; i++) {
-        auto& ctx = ctxs[from + i];
-        if (!ctx.prep.delta.empty()) {
-            // Submit all delta tokens; only the LAST one needs logits
-            for (int32_t di = 0; di < (int32_t)ctx.prep.delta.size(); di++) {
-                batch.token[batch_idx]     = ctx.prep.delta[di];
-                batch.pos[batch_idx]       = ctx.prep.cached_pos + di;
-                batch.n_seq_id[batch_idx]  = 1;
-                batch.seq_id[batch_idx][0] = ctx.prep.seq_id;
-                batch.logits[batch_idx]    = (di == (int32_t)ctx.prep.delta.size() - 1) ? 1 : 0;
-                batch_idx++;
-            }
-            ctx_last_logit_idx[i] = batch_idx - 1;
-        } else if (ctx.prep.cached_pos > 0) {
-            // Full cache hit — KV has [0..cached_pos-1]; decode last token at cached_pos
-            // to get fresh logits.
-            llama_token last_tok = ctx.tokens[ctx.prep.cached_pos - 1];
-            batch.token[batch_idx]     = last_tok;
-            batch.pos[batch_idx]       = ctx.prep.cached_pos;  // next free position
-            batch.n_seq_id[batch_idx]  = 1;
+    struct PromptSubmission {
+        size_t ctx_index;
+        int32_t tokens;
+        int32_t logit_index;
+    };
+    std::vector<PromptSubmission> submissions;
+    int32_t prompt_tokens = 0;
+    for (size_t i = 0; i < prefilling.size() && prompt_tokens < capacity; ++i) {
+        auto& ctx = prefilling[i];
+        const int32_t total = !ctx.prep.delta.empty()
+            ? static_cast<int32_t>(ctx.prep.delta.size())
+            : (ctx.prep.cached_pos > 0 ? 1 : 0);
+        const int32_t remaining = total - ctx.delta_start;
+        if (remaining <= 0) continue;
+        const int32_t take = std::min(remaining, capacity - prompt_tokens);
+        const bool completes = take == remaining;
+        const int32_t start = ctx.delta_start;
+        for (int32_t offset = 0; offset < take; ++offset) {
+            const int32_t prompt_index = start + offset;
+            batch.token[batch_idx] = !ctx.prep.delta.empty()
+                ? ctx.prep.delta[prompt_index]
+                : ctx.tokens[ctx.prep.cached_pos - 1];
+            batch.pos[batch_idx] = !ctx.prep.delta.empty()
+                ? ctx.prep.cached_pos + prompt_index
+                : ctx.prep.cached_pos;
+            batch.n_seq_id[batch_idx] = 1;
             batch.seq_id[batch_idx][0] = ctx.prep.seq_id;
-            batch.logits[batch_idx]    = 1;
-            ctx_last_logit_idx[i] = batch_idx;
-            batch_idx++;
+            batch.logits[batch_idx] = completes && offset == take - 1 ? 1 : 0;
+            ++batch_idx;
         }
+        submissions.push_back({i, take, completes ? batch_idx - 1 : -1});
+        prompt_tokens += take;
+    }
+    batch.n_tokens = batch_idx;
+    if (batch.n_tokens == 0) {
+        llama_batch_free(batch);
+        return;
     }
 
-    batch.n_tokens = batch_idx;  // adjust for any skipped ctxs
+    if (newly_admitted > 0) {
+        RF_INFO("worker", "step: admitted %zu, prefill %d tokens, decoding %d",
+                newly_admitted, prompt_tokens, decoding);
+    }
 
-    const auto prefill_started = std::chrono::steady_clock::now();
-    bool ok = (llama_decode(bridge_.ctx(), batch) == 0);
-    const auto prefill_finished = std::chrono::steady_clock::now();
+    int decode_status = llama_decode(bridge_.ctx(), batch);
+    if (decode_status == 1 && mapper_.evict_idle_sequence()) {
+        RF_WARN("worker", "Step stalled by full KV cache; evicted idle cache and retrying");
+        decode_status = llama_decode(bridge_.ctx(), batch);
+    }
     llama_batch_free(batch);
 
-    if (!ok) {
-        RF_ERROR("worker", "Parallel prefill decode failed");
-        for (size_t i = 0; i < n_sub; i++) {
-            auto& ctx = ctxs[from + i];
-            if (ctx.req.on_token) {
+    if (decode_status == 1) {
+        RF_WARN("worker", "Step stalled by full KV cache; keeping sequences queued");
+        return;
+    }
+    if (decode_status < 0) {
+        RF_ERROR("worker", "Fused batch decode failed (%d seqs, %d prompt tokens, status %d)",
+                 decoding, prompt_tokens, decode_status);
+        for (auto& seq : seqs) retire(seq, true);
+        seqs.clear();
+        for (auto& ctx : prefilling) {
+            if (ctx.req.on_token && !is_cancelled(ctx.req)) {
                 ctx.req.on_token("[ERROR: prefill failed]", true, nullptr);
             }
             mapper_.release_sequence(ctx.prep.seq_id, ctx.prep.leaf_node);
             tree_.release(ctx.prep.leaf_node);
         }
-        return active;
+        prefilling.clear();
+        return;
     }
 
-    // Successful prefill populated the prompt KV, so only now may these ids
-    // serve as sources for future prefix copies.
-    for (size_t i = 0; i < n_sub; i++) {
-        auto& ctx = ctxs[from + i];
-        mapper_.mark_sequence_ready(ctx.prep.seq_id, ctx.prep.leaf_node);
-        ctx.stats.prompt_ms = std::chrono::duration<double, std::milli>(
-            prefill_finished - prefill_started).count();
+    ++decode_steps_;
+    if (prompt_tokens > 0) {
+        prefill_tokens_.fetch_add(prompt_tokens, std::memory_order_relaxed);
+        prefill_calls_.fetch_add(1, std::memory_order_relaxed);
     }
 
-    // Sample first token for each ctx using its batch logit index
-    for (size_t i = 0; i < n_sub; i++) {
-        auto& ctx = ctxs[from + i];
-        int32_t logit_idx = ctx_last_logit_idx[i];
-        if (logit_idx < 0) continue;  // empty prompt, skip
+    // Finish prompt chunks only after the fused decode succeeds.  Pending
+    // sequences therefore cannot be copied by a request admitted this step.
+    std::vector<int32_t> prompt_logits(prefilling.size(), -1);
+    for (const auto& submission : submissions) {
+        auto& ctx = prefilling[submission.ctx_index];
+        ctx.delta_start += submission.tokens;
+        const int32_t total = !ctx.prep.delta.empty()
+            ? static_cast<int32_t>(ctx.prep.delta.size())
+            : (ctx.prep.cached_pos > 0 ? 1 : 0);
+        if (ctx.delta_start == total) {
+            mapper_.mark_sequence_ready(ctx.prep.seq_id, ctx.prep.leaf_node);
+            prompt_logits[submission.ctx_index] = submission.logit_index;
+        }
+    }
 
+    const auto now = std::chrono::steady_clock::now();
+    for (int i = 0; i < decoding; ++i) {
+        ActiveSeq& seq = seqs[i];
+        llama_token new_tok = llama_sampler_sample(seq.sampler, bridge_.ctx(), i);
+        if (llama_vocab_is_eog(bridge_.vocab(), new_tok)) {
+            seq.done = true;
+            seq.notify_on_retire = true;
+            continue;
+        }
+        char buf[512];
+        const int32_t nc = llama_token_to_piece(bridge_.vocab(), new_tok, buf, sizeof(buf), 0, true);
+        std::string piece(buf, nc > 0 ? nc : 0);
+        ++seq.stats.predicted_n;
+        --seq.remaining;
+        const bool last = seq.remaining == 0;
+        if (seq.req.on_token && !is_cancelled(seq.req)) {
+            if (last) {
+                seq.stats.predicted_ms = std::chrono::duration<double, std::milli>(
+                    now - seq.generation_started_at).count();
+            }
+            seq.req.on_token(piece, last, last ? &seq.stats : nullptr);
+        }
+        if (last || is_cancelled(seq.req)) {
+            seq.done = true;
+        } else {
+            seq.next_token = new_tok;
+            ++seq.pos;
+        }
+    }
+    auto completed = std::remove_if(seqs.begin(), seqs.end(), [this](ActiveSeq& seq) {
+        if (!seq.done) return false;
+        if (is_cancelled(seq.req)) {
+            RF_INFO("worker", "Retiring cancelled sequence %d", seq.seq_id);
+        }
+        retire(seq, seq.notify_on_retire);
+        return true;
+    });
+    seqs.erase(completed, seqs.end());
+
+    std::vector<ActiveSeq> newly_active;
+    std::vector<size_t> completed_prefills;
+    for (size_t index = 0; index < prefilling.size(); ++index) {
+        const int32_t logit_index = prompt_logits[index];
+        if (logit_index < 0) continue;
+        auto& ctx = prefilling[index];
+        if (is_cancelled(ctx.req)) {
+            mapper_.release_sequence(ctx.prep.seq_id, ctx.prep.leaf_node);
+            tree_.release(ctx.prep.leaf_node);
+            completed_prefills.push_back(index);
+            continue;
+        }
         llama_sampler* sampler = bridge_.create_sampler(ctx.req.temperature, ctx.req.top_p);
-        llama_token first_tok  = llama_sampler_sample(sampler, bridge_.ctx(), logit_idx);
-
+        const llama_token first_tok = llama_sampler_sample(sampler, bridge_.ctx(), logit_index);
         if (llama_vocab_is_eog(bridge_.vocab(), first_tok)) {
             if (ctx.req.on_token) ctx.req.on_token("", true, &ctx.stats);
             LlamaBridge::free_sampler(sampler);
             mapper_.release_sequence(ctx.prep.seq_id, ctx.prep.leaf_node);
             tree_.release(ctx.prep.leaf_node);
+            completed_prefills.push_back(index);
             continue;
         }
-
         char buf[512];
-        int32_t nc = llama_token_to_piece(bridge_.vocab(), first_tok, buf, sizeof(buf), 0, true);
+        const int32_t nc = llama_token_to_piece(bridge_.vocab(), first_tok, buf,
+                                                 sizeof(buf), 0, true);
         std::string piece(buf, nc > 0 ? nc : 0);
         ctx.stats.predicted_n = 1;
-        bool first_is_last = (ctx.req.max_tokens <= 1);
+        const bool first_is_last = ctx.req.max_tokens <= 1;
+        if (first_is_last) ctx.stats.predicted_ms = 0.0;
         if (ctx.req.on_token) {
-            ctx.req.on_token(piece, first_is_last,
-                             first_is_last ? &ctx.stats : nullptr);
+            ctx.req.on_token(piece, first_is_last, first_is_last ? &ctx.stats : nullptr);
         }
-
         if (first_is_last) {
             LlamaBridge::free_sampler(sampler);
             mapper_.release_sequence(ctx.prep.seq_id, ctx.prep.leaf_node);
             tree_.release(ctx.prep.leaf_node);
+            completed_prefills.push_back(index);
             continue;
         }
-
-        // Compute position after prefill
-        int32_t decode_end_pos = ctx.prep.delta.empty()
-            ? ctx.prep.cached_pos + 1   // full-cache-hit: decoded at cached_pos
-            : ctx.prep.cached_pos + (int32_t)ctx.prep.delta.size();
-
+        const int32_t end_pos = ctx.prep.delta.empty()
+            ? ctx.prep.cached_pos + 1
+            : ctx.prep.cached_pos + static_cast<int32_t>(ctx.prep.delta.size());
         ActiveSeq seq;
-        seq.seq_id     = ctx.prep.seq_id;
-        seq.leaf_node  = ctx.prep.leaf_node;
-        seq.pos        = decode_end_pos;
+        seq.seq_id = ctx.prep.seq_id;
+        seq.leaf_node = ctx.prep.leaf_node;
+        seq.pos = end_pos;
         seq.next_token = first_tok;
-        seq.remaining  = ctx.req.max_tokens - 1;
-        seq.sampler    = sampler;
-        seq.stats      = ctx.stats;
-        seq.req        = std::move(ctx.req);
-        active.push_back(std::move(seq));
+        seq.remaining = ctx.req.max_tokens - 1;
+        seq.sampler = sampler;
+        seq.stats = ctx.stats;
+        seq.req = std::move(ctx.req);
+        seq.generation_started = true;
+        seq.generation_started_at = now;
+        newly_active.push_back(std::move(seq));
+        completed_prefills.push_back(index);
     }
-
-    return active;
-}
-
-// ── Phase 3: batched autoregressive loop ─────────────────────────────────────
-void InferenceWorker::run_batch(std::vector<ActiveSeq>& seqs) {
-    const auto generation_started = std::chrono::steady_clock::now();
-    for (auto& seq : seqs) seq.generation_started = generation_started;
-    while (!seqs.empty()) {
-        int n = (int)seqs.size();
-        llama_batch batch = llama_batch_init(n, 0, 1);
-        batch.n_tokens = n;
-        for (int i = 0; i < n; i++) {
-            batch.token[i]     = seqs[i].next_token;
-            batch.pos[i]       = seqs[i].pos;
-            batch.n_seq_id[i]  = 1;
-            batch.seq_id[i][0] = seqs[i].seq_id;
-            batch.logits[i]    = 1;
-        }
-
-        bool ok = (llama_decode(bridge_.ctx(), batch) == 0);
-        llama_batch_free(batch);
-
-        if (!ok) {
-            fprintf(stderr, "[radixforge] Batch decode failed (%d seqs)\n", n);
-            const auto finished = std::chrono::steady_clock::now();
-            for (auto& s : seqs) {
-                s.stats.predicted_ms = std::chrono::duration<double, std::milli>(
-                    finished - s.generation_started).count();
-                if (s.req.on_token) s.req.on_token("", true, &s.stats);
-            }
-            for (auto& s : seqs) {
-                LlamaBridge::free_sampler(s.sampler);
-                mapper_.release_sequence(s.seq_id, s.leaf_node);
-                tree_.release(s.leaf_node);
-            }
-            seqs.clear();
-            return;
-        }
-
-        for (int i = 0; i < n; i++) {
-            ActiveSeq& seq = seqs[i];
-            llama_token new_tok = llama_sampler_sample(seq.sampler, bridge_.ctx(), i);
-
-            if (llama_vocab_is_eog(bridge_.vocab(), new_tok)) {
-                seq.stats.predicted_ms = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - seq.generation_started).count();
-                if (seq.req.on_token) seq.req.on_token("", true, &seq.stats);
-                seq.done = true;
-                continue;
-            }
-
-            char buf[512];
-            int32_t nc = llama_token_to_piece(bridge_.vocab(), new_tok, buf, sizeof(buf), 0, true);
-            std::string piece(buf, nc > 0 ? nc : 0);
-
-            seq.stats.predicted_n++;
-            seq.remaining--;
-            bool last = (seq.remaining == 0);
-            if (last) {
-                seq.stats.predicted_ms = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - seq.generation_started).count();
-            }
-            if (seq.req.on_token) {
-                seq.req.on_token(piece, last, last ? &seq.stats : nullptr);
-            }
-
-            if (last) {
-                seq.done = true;
-            } else {
-                seq.next_token = new_tok;
-                seq.pos++;
-            }
-        }
-
-        auto end_it = std::remove_if(seqs.begin(), seqs.end(), [&](ActiveSeq& s) {
-            if (s.done) {
-                LlamaBridge::free_sampler(s.sampler);
-                mapper_.release_sequence(s.seq_id, s.leaf_node);
-                tree_.release(s.leaf_node);
-                return true;
-            }
-            return false;
-        });
-        seqs.erase(end_it, seqs.end());
+    for (auto it = completed_prefills.rbegin(); it != completed_prefills.rend(); ++it) {
+        prefilling.erase(prefilling.begin() + static_cast<std::ptrdiff_t>(*it));
     }
+    seqs.insert(seqs.end(), std::make_move_iterator(newly_active.begin()),
+                std::make_move_iterator(newly_active.end()));
 }
 
 void InferenceWorker::run() {
+    std::vector<ActiveSeq> active;
+    std::vector<PrefillCtx> prefilling;
+    const int32_t max_generating = static_cast<int32_t>(llama_n_seq_max(bridge_.ctx())) - 1;
     while (running_.load()) {
-      try {
-        std::vector<InferenceRequest> reqs;
-        {
-            std::unique_lock<std::mutex> lock(queue_mutex_);
-            queue_cv_.wait(lock, [this] {
-                return !queue_.empty() || !running_.load();
-            });
-            if (!running_.load() && queue_.empty()) break;
-            while (!queue_.empty()) {
-                reqs.push_back(std::move(queue_.front()));
-                queue_.pop_front();
-            }
-        }
-
-        // Repeat prepare + prefill so requests deferred behind a pending prefix
-        // are prefilled in this iteration, before any batch generation begins.
-        const size_t batch_count = reqs.size();
-        std::vector<InferenceRequest> pending = std::move(reqs);
-        std::vector<ActiveSeq> active;
-        size_t round = 0;
-        size_t round_limit = batch_count;
-        while (!pending.empty() && round++ < round_limit) {
-            std::vector<InferenceRequest> deferred;
-            auto ctxs = prepare_all(pending, &deferred);
-            if (ctxs.empty()) {
-                // A deferral round that prepares nothing cannot unblock itself.
-                // Recompute once without deferral rather than spinning forever.
-                if (!deferred.empty()) {
-                    RF_WARN("worker", "Deferred prefill made no progress; forcing recompute");
-                    ctxs = prepare_all(deferred, nullptr, false);
-                    deferred.clear();
-                }
-            }
-            if (!ctxs.empty()) {
-                RF_INFO("worker", "Parallel prefill round %zu: %zu sequences",
-                        round, ctxs.size());
-                auto ready = prefill_batch(ctxs);
-                active.insert(active.end(), std::make_move_iterator(ready.begin()),
-                              std::make_move_iterator(ready.end()));
-            }
-
-            // Include requests that reached the worker while this prefill was
-            // running. They are still admitted before generation, so they can
-            // use the just-ready prefixes in the next prepare/prefill round.
-            std::vector<InferenceRequest> arrived;
+        try {
+            std::vector<InferenceRequest> admitted;
             {
-                std::lock_guard<std::mutex> lock(queue_mutex_);
-                while (!queue_.empty()) {
-                    arrived.push_back(std::move(queue_.front()));
+                std::unique_lock<std::mutex> lock(queue_mutex_);
+                const bool idle = active.empty() && prefilling.empty();
+                if (idle && queue_.empty()) {
+                    queue_cv_.wait(lock, [this] { return !queue_.empty() || !running_.load(); });
+                }
+                if (!running_.load() && queue_.empty()) break;
+                if (idle && !queue_.empty() && admit_window_ms_ > 0) {
+                    const auto deadline = std::chrono::steady_clock::now() +
+                        std::chrono::milliseconds(admit_window_ms_);
+                    queue_cv_.wait_until(lock, deadline);
+                }
+                while (!queue_.empty() && static_cast<int32_t>(active.size() + prefilling.size() +
+                                             admitted.size()) < max_generating) {
+                    admitted.push_back(std::move(queue_.front()));
                     queue_.pop_front();
                 }
             }
-            if (!arrived.empty()) {
-                round_limit += arrived.size();
-                deferred.insert(deferred.end(), std::make_move_iterator(arrived.begin()),
-                                std::make_move_iterator(arrived.end()));
+
+            std::vector<InferenceRequest> pending = std::move(admitted);
+            std::vector<InferenceRequest> retry;
+            size_t prepared_count = 0;
+            if (!pending.empty()) {
+                std::vector<InferenceRequest> deferred;
+                std::vector<InferenceRequest> queued;
+                auto ctxs = prepare_all(pending, &deferred, &queued, nullptr);
+                prepared_count = ctxs.size();
+                prefilling.insert(prefilling.end(), std::make_move_iterator(ctxs.begin()),
+                                  std::make_move_iterator(ctxs.end()));
+                retry.insert(retry.end(), std::make_move_iterator(queued.begin()),
+                              std::make_move_iterator(queued.end()));
+                retry.insert(retry.end(), std::make_move_iterator(deferred.begin()),
+                             std::make_move_iterator(deferred.end()));
             }
-            pending = std::move(deferred);
+            defer_to_front(retry);
+
+            generating_sequences_.store(static_cast<int32_t>(active.size()),
+                                        std::memory_order_relaxed);
+            fused_step(active, prefilling, prepared_count);
+            generating_sequences_.store(static_cast<int32_t>(active.size()),
+                                        std::memory_order_relaxed);
+            ++request_count_;
+            if (request_count_ % 64 == 0) mapper_.defrag();
+        } catch (const std::exception& e) {
+            RF_WARN("worker", "Worker loop exception (non-fatal): %s", e.what());
+        } catch (...) {
+            RF_WARN("worker", "Worker loop unknown exception (non-fatal)");
         }
-
-        // This is only a guard fallback: requests arriving during generation
-        // still wait for the next worker iteration, as before.
-        defer_to_front(pending);
-
-        if (!active.empty()) {
-            RF_DEBUG("worker", "Batch generation: %zu sequences", active.size());
-            run_batch(active);
-        }
-
-        const size_t processed_count = round_limit - pending.size();
-        request_count_ += processed_count;
-        if (request_count_ % 64 < processed_count) mapper_.defrag();
-
-      } catch (const std::exception& e) {
-        RF_WARN("worker", "Worker loop exception (non-fatal): %s", e.what());
-      } catch (...) {
-        RF_WARN("worker", "Worker loop unknown exception (non-fatal)");
-      }
     }
+    for (auto& seq : active) retire(seq, false);
+    for (auto& ctx : prefilling) {
+        mapper_.release_sequence(ctx.prep.seq_id, ctx.prep.leaf_node);
+        tree_.release(ctx.prep.leaf_node);
+    }
+    generating_sequences_.store(0, std::memory_order_relaxed);
 }
 
 // --- Server (cpp-httplib) ---
@@ -613,12 +615,17 @@ void Server::start() {
         uint64_t hits  = m.hits.load(std::memory_order_relaxed);
         uint64_t total = m.total_requests.load(std::memory_order_relaxed);
         double hit_rate = total > 0 ? static_cast<double>(hits) / total : 0.0;
-        char buf[512];
+        char buf[768];
         snprintf(buf, sizeof(buf),
-            "{\"active_sequences\":%d,\"pending_requests\":%zu,"
+            "{\"active_sequences\":%d,\"generating_sequences\":%d,\"pending_requests\":%zu,"
+            "\"decode_steps\":%llu,\"prefill_tokens\":%llu,\"prefill_calls\":%llu,"
             "\"cache\":{\"hits\":%llu,\"misses\":%llu,\"evictions\":%llu,"
             "\"total_requests\":%llu,\"hit_rate\":%.4f}}",
-            worker_.active_sequence_count(), worker_.pending_count(),
+            worker_.active_sequence_count(), worker_.generating_sequence_count(),
+            worker_.pending_count(),
+            (unsigned long long)worker_.decode_steps(),
+            (unsigned long long)worker_.prefill_tokens(),
+            (unsigned long long)worker_.prefill_calls(),
             (unsigned long long)hits,
             (unsigned long long)m.misses.load(std::memory_order_relaxed),
             (unsigned long long)m.evictions.load(std::memory_order_relaxed),
@@ -731,6 +738,9 @@ void Server::start() {
                                     state->cv.notify_one();
                                 }
                             };
+                            req.cancelled = [state] {
+                                return state->cancelled.load(std::memory_order_relaxed);
+                            };
                             state->enqueued = true;
                             enqueue_request = true;
                         }
@@ -786,6 +796,9 @@ void Server::start() {
                     state->done = true;
                     state->cv.notify_one();
                 }
+            };
+            req.cancelled = [state] {
+                return state->cancelled.load(std::memory_order_relaxed);
             };
 
             worker_.enqueue(std::move(req));

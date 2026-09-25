@@ -106,12 +106,17 @@ void KVMapper::gc_if_needed() {
     evict_one_locked();
 }
 
+bool KVMapper::evict_idle_sequence() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return evict_one_locked();
+}
+
 llama_seq_id KVMapper::allocate_seq_id_locked() {
     if (free_seq_ids_.empty()) {
         evict_one_locked();
     }
     if (free_seq_ids_.empty()) {
-        throw std::runtime_error("No free seq_ids available after eviction");
+        throw SequenceCapacityExhausted("No free seq_ids available after eviction");
     }
     // Warn when pool is near saturation (below gc_watermark remaining)
     int32_t remaining = static_cast<int32_t>(free_seq_ids_.size());
@@ -124,12 +129,12 @@ llama_seq_id KVMapper::allocate_seq_id_locked() {
     return id;
 }
 
-void KVMapper::evict_one_locked() {
+bool KVMapper::evict_one_locked() {
     while (true) {
         auto candidates = tree_.find_eviction_candidates(1);
         if (candidates.empty()) {
             RF_WARN("kv_mapper", "No eviction candidates available");
-            return;
+            return false;
         }
 
         std::vector<llama_seq_id> evicted = tree_.evict(candidates[0]);
@@ -141,7 +146,7 @@ void KVMapper::evict_one_locked() {
             RF_DEBUG("kv_mapper", "Evicted seq %d (LRU)", sid);
         }
         metrics_.evictions.fetch_add(evicted.size(), std::memory_order_relaxed);
-        return;
+        return true;
     }
 }
 
