@@ -4,6 +4,9 @@ build/
 # Downloaded models (can be large)
 models/
 
+# Generated benchmark datasets
+data/
+
 
 # macOS
 .DS_Store
