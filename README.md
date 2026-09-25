@@ -54,7 +54,7 @@ The KV Mapper translates Radix Tree logical operations into llama.cpp API calls:
 
 ### The HTTP Server
 
-Single-threaded HTTP server (cpp-httplib, no external dependencies) with a single `InferenceWorker` thread. This is intentional: Apple Silicon has no hardware GPU multi-tenancy — a single thread managing a queue is more efficient than N threads contending for Metal.
+Single-threaded HTTP server (cpp-httplib, no external dependencies) with a single `InferenceWorker` thread. This is intentional: Apple Silicon has no hardware GPU multi-tenancy — a single thread managing a queue is more efficient than N threads contending for Metal. The worker uses continuous batching: every step is one `llama_decode` that carries the next token of each active sequence plus the prompt tokens of newly admitted requests (bounded by `n_batch`, long prompts are chunked across steps). New requests join the running batch at the next step; finished or disconnected requests release their sequence immediately. When the worker is idle it waits up to `--admit-window-ms` for more arrivals, so bursts share one prefill.
 
 ---
 
@@ -127,6 +127,7 @@ ctest --test-dir build --output-on-failure
 | `--host` | `127.0.0.1` | Bind address |
 | `--port` | `8400` | HTTP port |
 | `--max-seq` | `32` | Maximum concurrent sequences |
+| `--admit-window-ms` | `2` | When idle, wait this long for more arrivals before the first step (bursts share a prefill); `0` minimizes single-request latency |
 
 ### Configuration guide
 
@@ -251,7 +252,34 @@ At concurrency 8 RadixForge completes the workload in 2.98 s vs 4.08 s for
 llama-server with prompt caching (10.7 vs 7.8 requests/s). The gap comes from
 concurrent fan-out: llama-server's prompt cache is per slot, so agents that land
 on different slots each recompute the shared prefix; RadixForge computes it
-once. Decode is not faster (no continuous batching yet).
+once. These numbers predate continuous batching; the A/B below shows it is on par
+for this synchronized workload.
+
+### Continuous batching: requests arriving while others generate
+
+64 streaming requests, one every 60 ms, 600-word shared system prompt, 16–96 output
+tokens, 3 rounds with rotated order, same binary build before/after (M4 Pro on
+battery; compare rows with each other):
+
+| | static batching | continuous batching | llama-server (`--cache-reuse`, 16 slots) |
+|---|---:|---:|---:|
+| successful requests | 184/192 | **192/192** | 192/192 |
+| TTFT p50 | 783 ms | **50 ms** | 1,370 ms |
+| TTFT p95 | 1,907 ms | **278 ms** | 1,642 ms |
+| full response p50 | 2,179 ms | **1,375 ms** | 2,193 ms |
+| full response p95 | 4,050 ms | 3,466 ms | **3,314 ms** |
+| wall time | 7.1 s | **6.0 s** | 6.5 s |
+
+Before, a request that arrived during generation waited for the whole batch to
+finish, and bursts could exhaust sequence slots (the 8 failed requests: "No free
+seq_ids"); now requests wait in the queue until a slot frees up. Tail latency of
+full responses is still slightly behind llama-server. On the synchronized 8-agent
+workload above, continuous batching is within noise of static (wall 2.96 vs 2.97 s
+at concurrency 8); at concurrency 1 the idle admission window adds ~2 ms to TTFT
+(`--admit-window-ms 0` removes it).
+
+Reproduce: `python3 scripts/ab_open_loop.py --model <model.gguf> --corpus <text.txt>
+--target static=<old binary> --target continuous=build/radixforge --llama-server`.
 
 Harness, methodology and full results:
 [local-llm-bench `prefix-sharing`](https://github.com/gioalvari/local-llm-bench).
@@ -311,8 +339,6 @@ After a node split, the `seq_ids` **stay on the prefix (parent) node** — the s
 - **Single model** — the server loads one GGUF model at startup. Serving different models in parallel requires separate instances on different ports.
 - **Fixed chat template** — uses ChatML (`<|im_start|>role\ncontent<|im_end|>`). Models with different templates (Llama-3, Mistral) may produce degraded quality.
 - **No tool use / function calling** — text completions only.
-- **Static batching** — requests that arrive while a batch is generating wait for it to finish; there is no continuous batching yet.
-- **Cooperative cancellation** — a disconnected client's request still runs to completion before its sequence is released.
 
 ---
 
