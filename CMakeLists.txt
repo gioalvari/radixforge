@@ -61,5 +61,6 @@ endif()
 target_compile_options(radixforge PRIVATE -Wall -Wextra -Wpedantic)
 
 if(RADIXFORGE_BUILD_TESTS)
+    enable_testing()
     add_subdirectory(test)
 endif()

@@ -6,14 +6,9 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 echo "=== RadixForge Setup ==="
 
-# Clone llama.cpp if not present
-if [ ! -d "$PROJECT_DIR/vendor/llama.cpp" ]; then
-    echo "[1/3] Cloning llama.cpp..."
-    git clone --depth 1 https://github.com/ggerganov/llama.cpp "$PROJECT_DIR/vendor/llama.cpp"
-else
-    echo "[1/3] llama.cpp already present, pulling latest..."
-    cd "$PROJECT_DIR/vendor/llama.cpp" && git pull --ff-only
-fi
+# Fetch the pinned llama.cpp submodule
+echo "[1/3] Initializing llama.cpp submodule (pinned commit)..."
+git -C "$PROJECT_DIR" submodule update --init --recursive vendor/llama.cpp
 
 # Create build directory
 echo "[2/3] Configuring CMake (Release + Metal)..."

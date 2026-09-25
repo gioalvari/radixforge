@@ -1,5 +1,8 @@
 # RadixForge
 
+[![CI](https://github.com/gioalvari/radixforge/actions/workflows/ci.yml/badge.svg)](https://github.com/gioalvari/radixforge/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 **Radix Tree KV Cache Orchestrator for multi-agent LLM inference on Apple Silicon.**
 
 RadixForge is a C++ LLM inference server that solves the core multi-agent problem: when 10 AI agents share the same 2000-token system prompt, why compute it 10 times? RadixForge computes it once and shares it in memory — **zero-copy**.
@@ -69,11 +72,11 @@ Single-threaded HTTP server (cpp-httplib, no external dependencies) with a singl
 ## Build
 
 ```bash
-# 1. Clone the project
-git clone https://github.com/gioalvari/radixforge
+# 1. Clone the project (llama.cpp is a pinned submodule)
+git clone --recursive https://github.com/gioalvari/radixforge
 cd radixforge
 
-# 2. One-command build (clones llama.cpp, configures Metal, compiles)
+# 2. One-command build (fetches the llama.cpp submodule, configures Metal, compiles)
 chmod +x scripts/setup.sh
 ./scripts/setup.sh
 ```
@@ -83,7 +86,7 @@ The binary is produced at `build/radixforge` (~120KB stripped). The first run is
 ### Manual build
 
 ```bash
-git clone --depth 1 https://github.com/ggerganov/llama.cpp vendor/llama.cpp
+git submodule update --init --recursive
 
 cmake -B build -S . \
   -DCMAKE_BUILD_TYPE=Release \
@@ -91,6 +94,12 @@ cmake -B build -S . \
   -DCMAKE_OSX_ARCHITECTURES=arm64
 
 cmake --build build --config Release -j$(sysctl -n hw.ncpu)
+```
+
+### Tests
+
+```bash
+ctest --test-dir build --output-on-failure
 ```
 
 ---
@@ -246,7 +255,7 @@ radixforge/
 │   ├── kv_mapper.cpp          # GC, eviction, cache synchronization
 │   └── server.cpp             # HTTP (httplib), SSE streaming, generation loop
 ├── vendor/
-│   └── llama.cpp/             # llama.cpp clone (not a submodule)
+│   └── llama.cpp/             # llama.cpp (git submodule, pinned commit)
 └── models/                    # Model files directory (git-ignored)
 ```
 
