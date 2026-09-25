@@ -33,6 +33,12 @@ LlamaBridge::LlamaBridge(const Config& config) : config_(config) {
     ctx_params.n_batch   = config.n_batch;
     ctx_params.n_ubatch  = config.n_batch;  // must equal n_batch for encoder models
     ctx_params.n_seq_max = config.max_sequences;
+    // One KV buffer shared by all sequences. Without this llama.cpp splits
+    // n_ctx into n_seq_max streams (n_ctx / n_seq_max tokens each), rejects
+    // longer prompts, and seq_cp across streams physically copies KV data.
+    // Unified: every sequence can use the full context and seq_cp only tags
+    // existing cells with the new seq_id (true zero-copy prefix sharing).
+    ctx_params.kv_unified = true;
 
     ctx_.reset(llama_init_from_model(model_.get(), ctx_params));
     if (!ctx_) {

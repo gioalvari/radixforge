@@ -121,6 +121,10 @@ static void test_eviction_candidates() {
     auto m2 = tree.insert(tok({4, 5, 6}));
     auto m3 = tree.insert(tok({7, 8, 9}));
 
+    m1.node->seq_ids.insert(11);
+    m2.node->seq_ids.insert(22);
+    m3.node->seq_ids.insert(33);
+
     // Release all so ref_count == 0 → candidates for eviction
     tree.release(m1.node);
     tree.release(m2.node);
@@ -134,7 +138,76 @@ static void test_eviction_candidates() {
 
     // Request more than available
     auto all = tree.find_eviction_candidates(10);
-    CHECK(all.size() == 3,           "find_eviction_candidates(10): capped at 3 leaves");
+    CHECK(all.size() == 3,           "find_eviction_candidates(10): capped at 3 nodes");
+}
+
+static void test_split_prefix_is_evictable() {
+    printf("\n[test_split_prefix_is_evictable]\n");
+    radixforge::RadixTree tree;
+
+    auto original = tree.insert(tok({1, 2, 3, 4}));
+    original.node->seq_ids.insert(42);
+    auto branch = tree.insert(tok({1, 2, 5, 6}));
+
+    CHECK(!original.node->children.empty(),
+          "split: original node became an internal prefix");
+    CHECK(original.node->seq_ids.count(42) == 1,
+          "split: physical seq_id remains on internal prefix");
+
+    tree.release(original.node);
+    tree.release(branch.node);
+    CHECK(original.node->ref_count == 0,
+          "release: internal prefix reference count returns to zero");
+
+    auto candidates = tree.find_eviction_candidates(1);
+    CHECK(candidates.size() == 1,
+          "internal prefix with seq_id is an eviction candidate");
+    CHECK(candidates[0] == original.node,
+          "eviction candidate is the internal seq_id owner");
+
+    auto evicted = tree.evict(original.node);
+    CHECK(evicted.size() == 1 && evicted[0] == 42,
+          "eviction invalidates the internal node's seq_id");
+    CHECK(original.node->children.size() == 2,
+          "eviction keeps internal prefix structure for recomputation");
+    CHECK(tree.find_covering_seq_id(original.node) == -1,
+          "invalidated seq_id is not returned as a cache hit");
+}
+
+static void test_pending_sequences_are_not_cache_sources() {
+    printf("\n[test_pending_sequences_are_not_cache_sources]\n");
+    radixforge::RadixTree tree;
+    auto first = tree.insert(tok({1, 2, 3, 4}));
+    tree.register_seq_id(first.node, 42, 4);
+
+    auto pending = tree.inspect_prefix(tok({1, 2, 3, 4, 5}));
+    CHECK(pending.matched_tokens == 4, "pending prefix: logical path matches");
+    CHECK(pending.ready_tokens == 0, "pending prefix: no ready cache coverage");
+    CHECK(pending.pending_tokens == 4, "pending prefix: pending coverage reported");
+    CHECK(tree.find_covering_seq_id(first.node) == -1,
+          "pending sequence is never returned as a copy source");
+
+    tree.mark_seq_id_ready(first.node, 42);
+    int32_t canonical_len = 0;
+    CHECK(tree.find_covering_seq_id(first.node, &canonical_len) == 42,
+          "ready sequence is returned as a copy source");
+    CHECK(canonical_len == 4, "ready source reports its canonical coverage");
+
+    auto ready = tree.inspect_prefix(tok({1, 2, 3, 4, 5}));
+    CHECK(ready.ready_tokens == 4, "ready prefix: ready coverage reported");
+    CHECK(ready.pending_tokens == 0, "ready prefix: no pending coverage remains");
+
+    CHECK(!tree.release_seq_id(first.node, 42),
+          "releasing a sole ready sequence retains the canonical cache");
+    CHECK(tree.find_covering_seq_id(first.node) == 42,
+          "retained canonical sequence remains a cache source");
+
+    auto failed = tree.insert(tok({9, 8, 7}));
+    tree.register_seq_id(failed.node, 77, 3);
+    CHECK(tree.release_seq_id(failed.node, 77),
+          "releasing a pending sequence always frees its seq_id");
+    CHECK(tree.find_covering_seq_id(failed.node) == -1,
+          "failed pending sequence is never retained as a cache source");
 }
 
 static void test_to_json() {
@@ -166,6 +239,8 @@ int main() {
     test_active_sequence_count();
     test_release_decrements_ref_count();
     test_eviction_candidates();
+    test_split_prefix_is_evictable();
+    test_pending_sequences_are_not_cache_sources();
     test_to_json();
 
     printf("\n─────────────────────────────\n");

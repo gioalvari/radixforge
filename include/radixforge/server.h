@@ -6,10 +6,11 @@
 #include "radixforge/radix_tree.h"
 
 #include <atomic>
-#include <functional>
-#include <queue>
-#include <mutex>
+#include <chrono>
 #include <condition_variable>
+#include <deque>
+#include <functional>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -21,6 +22,16 @@ struct ChatMessage {
     std::string content;
 };
 
+// Per-request generation measurements compatible with llama-server's timings.
+struct InferenceStats {
+    int32_t prompt_n = 0;
+    int32_t cache_n = 0;
+    int32_t prompt_tokens = 0;
+    int32_t predicted_n = 0;
+    double prompt_ms = 0.0;
+    double predicted_ms = 0.0;
+};
+
 // A generation request from an agent
 struct InferenceRequest {
     std::string prompt;                 // raw prompt (used when messages is empty)
@@ -30,8 +41,10 @@ struct InferenceRequest {
     float top_p = 0.9f;
     bool stream = true;
 
-    // Callback for streaming tokens back (called from worker thread)
-    std::function<void(const std::string& token, bool is_last)> on_token;
+    // Callback for streaming tokens back (called from worker thread). stats is
+    // non-null only for the final callback.
+    std::function<void(const std::string& token, bool is_last,
+                       const InferenceStats* stats)> on_token;
 };
 
 // Internal prefill context — collected during the parallel prefill phase
@@ -40,6 +53,7 @@ struct PrefillCtx {
     KVMapper::PrepareResult prep;
     std::vector<llama_token> tokens;    // full prompt tokens (for full-cache-hit ref)
     int32_t delta_start = 0;            // index into tokens[] where delta begins
+    InferenceStats stats;
 };
 
 // Internal state for one active sequence in the batched decode loop
@@ -52,6 +66,8 @@ struct ActiveSeq {
     int32_t remaining = 0;     // remaining tokens to generate (decremented each step)
     llama_sampler* sampler = nullptr;
     bool done = false;
+    InferenceStats stats;
+    std::chrono::steady_clock::time_point generation_started;
 };
 
 // Single-threaded inference worker that processes requests from a queue.
@@ -73,7 +89,7 @@ private:
     RadixTree& tree_;
     KVMapper& mapper_;
 
-    std::queue<InferenceRequest> queue_;
+    std::deque<InferenceRequest> queue_;
     mutable std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
     std::atomic<bool> running_{false};
@@ -83,7 +99,10 @@ private:
     void run();
     // Step 1: tokenise + KV-prepare every request, build PrefillCtx list.
     //         Does NOT call llama_decode yet.
-    std::vector<PrefillCtx> prepare_all(std::vector<InferenceRequest>& reqs);
+    std::vector<PrefillCtx> prepare_all(std::vector<InferenceRequest>& reqs,
+                                        std::vector<InferenceRequest>* deferred,
+                                        bool allow_deferral = true);
+    void defer_to_front(std::vector<InferenceRequest>& deferred);
     // Step 2: submit all delta tokens in one llama_decode batch.
     //         Returns active seqs ready for the autoregressive loop.
     std::vector<ActiveSeq> prefill_batch(std::vector<PrefillCtx>& ctxs);

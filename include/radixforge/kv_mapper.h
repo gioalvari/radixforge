@@ -45,6 +45,13 @@ public:
 
     PrepareResult prepare_sequence(const std::vector<llama_token>& prompt_tokens);
 
+    // Mark a prepared sequence eligible as a prefix-copy source after its
+    // prefill llama_decode call has succeeded.
+    void mark_sequence_ready(llama_seq_id seq_id, RadixNode* node);
+
+    // Inspect ready and pending cache coverage without allocating a seq_id.
+    PrefixAvailability inspect_prefix(const std::vector<llama_token>& prompt_tokens) const;
+
     // Release a physical seq_id back to the pool after generation is done.
     void release_sequence(llama_seq_id seq_id, RadixNode* node);
 
@@ -66,11 +73,13 @@ private:
     Config config_;
 
     std::deque<llama_seq_id> free_seq_ids_;
-    std::mutex mutex_;
+    // Lock order when both locks are needed is KVMapper::mutex_, then
+    // RadixTree's shared_mutex. RadixTree never acquires the mapper mutex.
+    mutable std::mutex mutex_;
     CacheMetrics metrics_;
 
-    llama_seq_id allocate_seq_id();
-    void evict_one();
+    llama_seq_id allocate_seq_id_locked();
+    void evict_one_locked();
 };
 
 } // namespace radixforge

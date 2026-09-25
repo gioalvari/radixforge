@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <iterator>
 #include <string>
 
 namespace radixforge {
@@ -32,7 +33,7 @@ void InferenceWorker::stop() {
 void InferenceWorker::enqueue(InferenceRequest req) {
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
-        queue_.push(std::move(req));
+        queue_.push_back(std::move(req));
     }
     queue_cv_.notify_one();
 }
@@ -49,7 +50,8 @@ int32_t InferenceWorker::active_sequence_count() const {
 // ── Phase 1: tokenise + KV-prepare every request ─────────────────────────────
 // No llama_decode yet — just builds PrefillCtx for each request.
 std::vector<PrefillCtx> InferenceWorker::prepare_all(
-    std::vector<InferenceRequest>& reqs) {
+    std::vector<InferenceRequest>& reqs, std::vector<InferenceRequest>* deferred,
+    bool allow_deferral) {
 
     std::vector<PrefillCtx> ctxs;
     ctxs.reserve(reqs.size());
@@ -65,33 +67,55 @@ std::vector<PrefillCtx> InferenceWorker::prepare_all(
             prompt = bridge_.apply_chat_template(chat_msgs);
         }
 
-        PrefillCtx ctx;
-        ctx.req   = std::move(req);
-        ctx.tokens = bridge_.tokenize(prompt, /*add_bos=*/true);
+        std::vector<llama_token> tokens = bridge_.tokenize(prompt, /*add_bos=*/true);
 
         // Guard: clamp max_tokens so the total never exceeds the context window.
-        int32_t available = bridge_.n_ctx() - (int32_t)ctx.tokens.size() - 4;
+        int32_t available = bridge_.n_ctx() - (int32_t)tokens.size() - 4;
         if (available <= 0) {
             RF_WARN("worker", "Prompt too long (%zu tokens) for ctx %d — rejected",
-                    ctx.tokens.size(), bridge_.n_ctx());
-            if (ctx.req.on_token) ctx.req.on_token("[ERROR: prompt exceeds context window]", true);
+                    tokens.size(), bridge_.n_ctx());
+            if (req.on_token) {
+                req.on_token("[ERROR: prompt exceeds context window]", true, nullptr);
+            }
             continue;
         }
-        if (ctx.req.max_tokens > available) {
+        if (req.max_tokens > available) {
             RF_DEBUG("worker", "max_tokens clamped %d -> %d (ctx limit)",
-                     ctx.req.max_tokens, available);
-            ctx.req.max_tokens = available;
+                     req.max_tokens, available);
+            req.max_tokens = available;
         }
+
+        const PrefixAvailability availability = mapper_.inspect_prefix(tokens);
+        const int32_t pending_advantage =
+            availability.pending_tokens - availability.ready_tokens;
+        if (allow_deferral && pending_advantage > 0 &&
+            (pending_advantage >= 64 || pending_advantage * 2 >
+                                            static_cast<int32_t>(tokens.size()))) {
+            // Do not insert/allocate this request yet: the leading pending
+            // request will become ready (or be released on failure) this run.
+            // This prevents a copy from empty KV while retaining prefix sharing.
+            if (deferred) deferred->push_back(std::move(req));
+            continue;
+        }
+
+        PrefillCtx ctx;
+        ctx.req = std::move(req);
+        ctx.tokens = std::move(tokens);
 
         try {
             ctx.prep  = mapper_.prepare_sequence(ctx.tokens);
         } catch (const std::exception& e) {
             RF_ERROR("worker", "prepare_sequence failed: %s", e.what());
-            if (ctx.req.on_token) ctx.req.on_token("[ERROR: resource exhausted]", true);
+            if (ctx.req.on_token) {
+                ctx.req.on_token("[ERROR: resource exhausted]", true, nullptr);
+            }
             continue;
         }
 
         ctx.delta_start = ctx.prep.cached_pos;
+        ctx.stats.prompt_n = static_cast<int32_t>(ctx.prep.delta.size());
+        ctx.stats.cache_n = ctx.prep.cached_pos;
+        ctx.stats.prompt_tokens = static_cast<int32_t>(ctx.tokens.size());
 
         RF_DEBUG("worker", "Prefill: %zu tokens, cached: %d, delta: %zu",
                  ctx.tokens.size(), ctx.prep.cached_pos, ctx.prep.delta.size());
@@ -99,6 +123,15 @@ std::vector<PrefillCtx> InferenceWorker::prepare_all(
         ctxs.push_back(std::move(ctx));
     }
     return ctxs;
+}
+
+void InferenceWorker::defer_to_front(std::vector<InferenceRequest>& deferred) {
+    if (deferred.empty()) return;
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    for (auto it = deferred.rbegin(); it != deferred.rend(); ++it) {
+        queue_.push_front(std::move(*it));
+    }
+    queue_cv_.notify_one();
 }
 
 // ── Phase 2: parallel prefill ────────────────────────────────────────────────
@@ -198,18 +231,31 @@ std::vector<ActiveSeq> InferenceWorker::prefill_range(
 
     batch.n_tokens = batch_idx;  // adjust for any skipped ctxs
 
+    const auto prefill_started = std::chrono::steady_clock::now();
     bool ok = (llama_decode(bridge_.ctx(), batch) == 0);
+    const auto prefill_finished = std::chrono::steady_clock::now();
     llama_batch_free(batch);
 
     if (!ok) {
         RF_ERROR("worker", "Parallel prefill decode failed");
         for (size_t i = 0; i < n_sub; i++) {
             auto& ctx = ctxs[from + i];
-            if (ctx.req.on_token) ctx.req.on_token("[ERROR: prefill failed]", true);
+            if (ctx.req.on_token) {
+                ctx.req.on_token("[ERROR: prefill failed]", true, nullptr);
+            }
             mapper_.release_sequence(ctx.prep.seq_id, ctx.prep.leaf_node);
             tree_.release(ctx.prep.leaf_node);
         }
         return active;
+    }
+
+    // Successful prefill populated the prompt KV, so only now may these ids
+    // serve as sources for future prefix copies.
+    for (size_t i = 0; i < n_sub; i++) {
+        auto& ctx = ctxs[from + i];
+        mapper_.mark_sequence_ready(ctx.prep.seq_id, ctx.prep.leaf_node);
+        ctx.stats.prompt_ms = std::chrono::duration<double, std::milli>(
+            prefill_finished - prefill_started).count();
     }
 
     // Sample first token for each ctx using its batch logit index
@@ -222,7 +268,7 @@ std::vector<ActiveSeq> InferenceWorker::prefill_range(
         llama_token first_tok  = llama_sampler_sample(sampler, bridge_.ctx(), logit_idx);
 
         if (llama_vocab_is_eog(bridge_.vocab(), first_tok)) {
-            if (ctx.req.on_token) ctx.req.on_token("", true);
+            if (ctx.req.on_token) ctx.req.on_token("", true, &ctx.stats);
             LlamaBridge::free_sampler(sampler);
             mapper_.release_sequence(ctx.prep.seq_id, ctx.prep.leaf_node);
             tree_.release(ctx.prep.leaf_node);
@@ -232,8 +278,12 @@ std::vector<ActiveSeq> InferenceWorker::prefill_range(
         char buf[512];
         int32_t nc = llama_token_to_piece(bridge_.vocab(), first_tok, buf, sizeof(buf), 0, true);
         std::string piece(buf, nc > 0 ? nc : 0);
+        ctx.stats.predicted_n = 1;
         bool first_is_last = (ctx.req.max_tokens <= 1);
-        if (ctx.req.on_token) ctx.req.on_token(piece, first_is_last);
+        if (ctx.req.on_token) {
+            ctx.req.on_token(piece, first_is_last,
+                             first_is_last ? &ctx.stats : nullptr);
+        }
 
         if (first_is_last) {
             LlamaBridge::free_sampler(sampler);
@@ -254,6 +304,7 @@ std::vector<ActiveSeq> InferenceWorker::prefill_range(
         seq.next_token = first_tok;
         seq.remaining  = ctx.req.max_tokens - 1;
         seq.sampler    = sampler;
+        seq.stats      = ctx.stats;
         seq.req        = std::move(ctx.req);
         active.push_back(std::move(seq));
     }
@@ -263,6 +314,8 @@ std::vector<ActiveSeq> InferenceWorker::prefill_range(
 
 // ── Phase 3: batched autoregressive loop ─────────────────────────────────────
 void InferenceWorker::run_batch(std::vector<ActiveSeq>& seqs) {
+    const auto generation_started = std::chrono::steady_clock::now();
+    for (auto& seq : seqs) seq.generation_started = generation_started;
     while (!seqs.empty()) {
         int n = (int)seqs.size();
         llama_batch batch = llama_batch_init(n, 0, 1);
@@ -280,7 +333,12 @@ void InferenceWorker::run_batch(std::vector<ActiveSeq>& seqs) {
 
         if (!ok) {
             fprintf(stderr, "[radixforge] Batch decode failed (%d seqs)\n", n);
-            for (auto& s : seqs) if (s.req.on_token) s.req.on_token("", true);
+            const auto finished = std::chrono::steady_clock::now();
+            for (auto& s : seqs) {
+                s.stats.predicted_ms = std::chrono::duration<double, std::milli>(
+                    finished - s.generation_started).count();
+                if (s.req.on_token) s.req.on_token("", true, &s.stats);
+            }
             for (auto& s : seqs) {
                 LlamaBridge::free_sampler(s.sampler);
                 mapper_.release_sequence(s.seq_id, s.leaf_node);
@@ -295,7 +353,9 @@ void InferenceWorker::run_batch(std::vector<ActiveSeq>& seqs) {
             llama_token new_tok = llama_sampler_sample(seq.sampler, bridge_.ctx(), i);
 
             if (llama_vocab_is_eog(bridge_.vocab(), new_tok)) {
-                if (seq.req.on_token) seq.req.on_token("", true);
+                seq.stats.predicted_ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - seq.generation_started).count();
+                if (seq.req.on_token) seq.req.on_token("", true, &seq.stats);
                 seq.done = true;
                 continue;
             }
@@ -304,9 +364,16 @@ void InferenceWorker::run_batch(std::vector<ActiveSeq>& seqs) {
             int32_t nc = llama_token_to_piece(bridge_.vocab(), new_tok, buf, sizeof(buf), 0, true);
             std::string piece(buf, nc > 0 ? nc : 0);
 
+            seq.stats.predicted_n++;
             seq.remaining--;
             bool last = (seq.remaining == 0);
-            if (seq.req.on_token) seq.req.on_token(piece, last);
+            if (last) {
+                seq.stats.predicted_ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - seq.generation_started).count();
+            }
+            if (seq.req.on_token) {
+                seq.req.on_token(piece, last, last ? &seq.stats : nullptr);
+            }
 
             if (last) {
                 seq.done = true;
@@ -341,27 +408,68 @@ void InferenceWorker::run() {
             if (!running_.load() && queue_.empty()) break;
             while (!queue_.empty()) {
                 reqs.push_back(std::move(queue_.front()));
-                queue_.pop();
+                queue_.pop_front();
             }
         }
 
-        // Phase 1: tokenise + KV-prepare (no GPU)
-        auto ctxs = prepare_all(reqs);
-
-        // Phase 2: one GPU prefill call for all deltas
-        if (!ctxs.empty()) {
-            RF_INFO("worker", "Parallel prefill: %zu sequences", ctxs.size());
-            auto active = prefill_batch(ctxs);
-
-            // Phase 3: batched autoregressive generation
-            if (!active.empty()) {
-                RF_DEBUG("worker", "Batch generation: %zu sequences", active.size());
-                run_batch(active);
+        // Repeat prepare + prefill so requests deferred behind a pending prefix
+        // are prefilled in this iteration, before any batch generation begins.
+        const size_t batch_count = reqs.size();
+        std::vector<InferenceRequest> pending = std::move(reqs);
+        std::vector<ActiveSeq> active;
+        size_t round = 0;
+        size_t round_limit = batch_count;
+        while (!pending.empty() && round++ < round_limit) {
+            std::vector<InferenceRequest> deferred;
+            auto ctxs = prepare_all(pending, &deferred);
+            if (ctxs.empty()) {
+                // A deferral round that prepares nothing cannot unblock itself.
+                // Recompute once without deferral rather than spinning forever.
+                if (!deferred.empty()) {
+                    RF_WARN("worker", "Deferred prefill made no progress; forcing recompute");
+                    ctxs = prepare_all(deferred, nullptr, false);
+                    deferred.clear();
+                }
             }
+            if (!ctxs.empty()) {
+                RF_INFO("worker", "Parallel prefill round %zu: %zu sequences",
+                        round, ctxs.size());
+                auto ready = prefill_batch(ctxs);
+                active.insert(active.end(), std::make_move_iterator(ready.begin()),
+                              std::make_move_iterator(ready.end()));
+            }
+
+            // Include requests that reached the worker while this prefill was
+            // running. They are still admitted before generation, so they can
+            // use the just-ready prefixes in the next prepare/prefill round.
+            std::vector<InferenceRequest> arrived;
+            {
+                std::lock_guard<std::mutex> lock(queue_mutex_);
+                while (!queue_.empty()) {
+                    arrived.push_back(std::move(queue_.front()));
+                    queue_.pop_front();
+                }
+            }
+            if (!arrived.empty()) {
+                round_limit += arrived.size();
+                deferred.insert(deferred.end(), std::make_move_iterator(arrived.begin()),
+                                std::make_move_iterator(arrived.end()));
+            }
+            pending = std::move(deferred);
         }
 
-        request_count_ += reqs.size();
-        if (request_count_ % 64 < reqs.size()) mapper_.defrag();
+        // This is only a guard fallback: requests arriving during generation
+        // still wait for the next worker iteration, as before.
+        defer_to_front(pending);
+
+        if (!active.empty()) {
+            RF_DEBUG("worker", "Batch generation: %zu sequences", active.size());
+            run_batch(active);
+        }
+
+        const size_t processed_count = round_limit - pending.size();
+        request_count_ += processed_count;
+        if (request_count_ % 64 < processed_count) mapper_.defrag();
 
       } catch (const std::exception& e) {
         RF_WARN("worker", "Worker loop exception (non-fatal): %s", e.what());
@@ -388,6 +496,21 @@ static bool check_admin_auth(const Config& config,
     res.set_content("{\"error\":\"Unauthorized — set Authorization: Bearer <admin-token>\"}",
                     "application/json");
     return false;
+}
+
+static std::string timings_json(const InferenceStats& stats) {
+    return "{\"prompt_n\":" + std::to_string(stats.prompt_n) +
+           ",\"cache_n\":" + std::to_string(stats.cache_n) +
+           ",\"prompt_ms\":" + std::to_string(stats.prompt_ms) +
+           ",\"predicted_n\":" + std::to_string(stats.predicted_n) +
+           ",\"predicted_ms\":" + std::to_string(stats.predicted_ms) + "}";
+}
+
+static std::string usage_json(const InferenceStats& stats) {
+    return "{\"prompt_tokens\":" + std::to_string(stats.prompt_tokens) +
+           ",\"completion_tokens\":" + std::to_string(stats.predicted_n) +
+           ",\"total_tokens\":" +
+           std::to_string(stats.prompt_tokens + stats.predicted_n) + "}";
 }
 
 static void parse_request_body(const httplib::Request& req_http,
@@ -560,38 +683,63 @@ void Server::start() {
                 std::mutex mtx;
                 std::condition_variable cv;
                 std::atomic<bool> cancelled{false};
+                bool enqueued = false;
                 bool done = false;
             };
             auto state = std::make_shared<StreamState>();
 
             res.set_chunked_content_provider("text/event-stream",
                 [this, req = std::move(req), state](size_t /*offset*/,
-                                                     httplib::DataSink& sink) mutable -> bool {
-                    // Wire on_token to write directly to sink (only valid inside this lambda).
-                    req.on_token = [state, &sink](const std::string& token, bool is_last) {
-                        if (state->cancelled.load(std::memory_order_relaxed)) return;
+                                                      httplib::DataSink& sink) mutable -> bool {
+                    bool enqueue_request = false;
+                    {
                         std::lock_guard<std::mutex> lk(state->mtx);
-                        if (!sink.is_writable()) {
-                            state->cancelled.store(true, std::memory_order_relaxed);
-                            state->done = true;
-                            state->cv.notify_one();
-                            return;
+                        if (!state->enqueued) {
+                            // The sink is valid until this provider returns. The
+                            // mutex synchronizes disconnect with worker writes.
+                            req.on_token = [state, &sink](const std::string& token,
+                                                           bool is_last,
+                                                           const InferenceStats* stats) {
+                                std::lock_guard<std::mutex> token_lk(state->mtx);
+                                if (state->cancelled.load(std::memory_order_relaxed)) return;
+                                if (!sink.is_writable()) {
+                                    state->cancelled.store(true, std::memory_order_relaxed);
+                                    state->done = true;
+                                    state->cv.notify_one();
+                                    return;
+                                }
+                                std::string chunk =
+                                    "data: {\"choices\":[{\"delta\":{\"content\":\""
+                                    + json_escape_s(token) + "\"},\"finish_reason\":"
+                                    + (is_last ? "\"stop\"" : "null")
+                                    + (is_last && stats
+                                           ? "}],\"timings\":" + timings_json(*stats) +
+                                                 ",\"usage\":" + usage_json(*stats)
+                                           : "")
+                                    + (is_last && stats ? "}" : "}]}" ) + "\n\n";
+                                if (!sink.write(chunk.c_str(), chunk.size())) {
+                                    state->cancelled.store(true, std::memory_order_relaxed);
+                                    state->done = true;
+                                    state->cv.notify_one();
+                                    return;
+                                }
+                                if (is_last) {
+                                    if (!sink.write("data: [DONE]\n\n", 14)) {
+                                        state->cancelled.store(true, std::memory_order_relaxed);
+                                    }
+                                    state->done = true;
+                                    state->cv.notify_one();
+                                }
+                            };
+                            state->enqueued = true;
+                            enqueue_request = true;
                         }
-                        std::string chunk =
-                            "data: {\"choices\":[{\"delta\":{\"content\":\""
-                            + json_escape_s(token) + "\"},\"finish_reason\":"
-                            + (is_last ? "\"stop\"" : "null") + "}]}\n\n";
-                        sink.write(chunk.c_str(), chunk.size());
-                        if (is_last) {
-                            sink.write("data: [DONE]\n\n", 14);
-                            state->done = true;
-                            state->cv.notify_one();
-                        }
-                    };
+                    }
 
-                    worker_.enqueue(std::move(req));
+                    if (enqueue_request) worker_.enqueue(std::move(req));
 
-                    // Keepalive loop — send empty delta every 2s while waiting
+                    // A completed provider must call done(); returning true alone
+                    // asks cpp-httplib to invoke this lambda again.
                     std::unique_lock<std::mutex> lk(state->mtx);
                     while (!state->cv.wait_for(lk, std::chrono::seconds(2),
                                                [&]{ return state->done; })) {
@@ -601,9 +749,18 @@ void Server::start() {
                         }
                         static const std::string ka =
                             "data: {\"choices\":[{\"delta\":{},\"finish_reason\":null}]}\n\n";
-                        sink.write(ka.c_str(), ka.size());
+                        if (!sink.write(ka.c_str(), ka.size())) {
+                            state->cancelled.store(true, std::memory_order_relaxed);
+                            return false;
+                        }
                     }
-                    return true;  // close stream
+                    if (state->cancelled.load(std::memory_order_relaxed)) {
+                        lk.unlock();
+                        return false;
+                    }
+                    lk.unlock();
+                    sink.done();
+                    return true;
                 });
         } else {
             // Non-streaming: state lives in a shared_ptr — safe even if this
@@ -612,17 +769,23 @@ void Server::start() {
                 std::mutex mtx;
                 std::condition_variable cv;
                 std::string full_response;
+                InferenceStats stats;
                 std::atomic<bool> cancelled{false};
                 bool done = false;
             };
             auto state = std::make_shared<NonStreamState>();
 
             req.stream = false;
-            req.on_token = [state](const std::string& token, bool is_last) {
+            req.on_token = [state](const std::string& token, bool is_last,
+                                   const InferenceStats* stats) {
                 if (state->cancelled.load(std::memory_order_relaxed)) return;
                 std::lock_guard<std::mutex> lk(state->mtx);
                 state->full_response += token;
-                if (is_last) { state->done = true; state->cv.notify_one(); }
+                if (is_last) {
+                    if (stats) state->stats = *stats;
+                    state->done = true;
+                    state->cv.notify_one();
+                }
             };
 
             worker_.enqueue(std::move(req));
@@ -641,7 +804,9 @@ void Server::start() {
             std::string json_resp =
                 "{\"choices\":[{\"message\":{\"role\":\"assistant\","
                 "\"content\":\"" + json_escape_s(state->full_response) +
-                "\"},\"finish_reason\":\"stop\"}]}";
+                "\"},\"finish_reason\":\"stop\"}],\"timings\":" +
+                timings_json(state->stats) + ",\"usage\":" +
+                usage_json(state->stats) + "}";
             res.set_content(json_resp, "application/json");
         }
     };

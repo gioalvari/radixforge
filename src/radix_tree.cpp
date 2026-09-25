@@ -37,6 +37,12 @@ PrefixMatch RadixTree::insert(const std::vector<llama_token>& prompt_tokens) {
     return match;
 }
 
+PrefixAvailability RadixTree::inspect_prefix(
+    const std::vector<llama_token>& prompt_tokens) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    return inspect_prefix_locked(prompt_tokens);
+}
+
 void RadixTree::release(RadixNode* node) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     if (node && node->ref_count > 0) {
@@ -48,8 +54,6 @@ PrefixMatch RadixTree::find_prefix_locked(const std::vector<llama_token>& tokens
     RadixNode* current = root_.get();
     int32_t matched_total = 0;
     size_t token_idx = 0;
-    llama_seq_id captured_seq_id = -1;  // seq_id captured before a node split
-
     while (token_idx < tokens.size()) {
         llama_token next_token = tokens[token_idx];
 
@@ -71,11 +75,6 @@ PrefixMatch RadixTree::find_prefix_locked(const std::vector<llama_token>& tokens
 
         if (match_len < child->tokens.size()) {
             // Partial match within node — split needed.
-            // Capture seq_id BEFORE split; seq_ids stay on the prefix node after split
-            // so the capture and the node's seq_ids remain consistent.
-            if (!child->seq_ids.empty()) {
-                captured_seq_id = *child->seq_ids.begin();
-            }
             split_node(child, match_len);
             // After split, child now contains only the matched prefix
             matched_total += (int32_t)match_len;
@@ -95,8 +94,50 @@ PrefixMatch RadixTree::find_prefix_locked(const std::vector<llama_token>& tokens
     result.cache_node = current;
     result.matched_tokens = matched_total;
     result.remaining.assign(tokens.begin() + token_idx, tokens.end());
-    result.cache_seq_id = captured_seq_id;
     return result;
+}
+
+void RadixTree::consider_availability(const RadixNode* node, int32_t covered,
+                                      PrefixAvailability* availability) {
+    if (!node || covered <= 0) return;
+    const int32_t cache_coverage = std::min(covered, node->canonical_len);
+    if (cache_coverage <= 0) return;
+    if (!node->ready_seq_ids.empty()) {
+        availability->ready_tokens = std::max(availability->ready_tokens, cache_coverage);
+    }
+    if (node->seq_ids.size() > node->ready_seq_ids.size()) {
+        availability->pending_tokens = std::max(availability->pending_tokens, cache_coverage);
+    }
+}
+
+PrefixAvailability RadixTree::inspect_prefix_locked(
+    const std::vector<llama_token>& tokens) const {
+    PrefixAvailability availability;
+    const RadixNode* current = root_.get();
+    size_t token_idx = 0;
+    int32_t matched = 0;
+
+    while (token_idx < tokens.size()) {
+        auto it = current->children.find(tokens[token_idx]);
+        if (it == current->children.end()) break;
+
+        const RadixNode* child = it->second.get();
+        size_t match_len = 0;
+        while (match_len < child->tokens.size() && token_idx + match_len < tokens.size() &&
+               child->tokens[match_len] == tokens[token_idx + match_len]) {
+            ++match_len;
+        }
+        if (match_len == 0) break;
+
+        matched += static_cast<int32_t>(match_len);
+        consider_availability(child, matched, &availability);
+        if (match_len < child->tokens.size()) break;
+
+        token_idx += match_len;
+        current = child;
+    }
+    availability.matched_tokens = matched;
+    return availability;
 }
 
 void RadixTree::split_node(RadixNode* node, size_t split_pos) {
@@ -113,6 +154,7 @@ void RadixTree::split_node(RadixNode* node, size_t split_pos) {
     // ref_count STAYS on prefix (active requests point to node, not suffix).
     // Suffix starts at 0 — no request has it as leaf_node yet.
     suffix_node->seq_ids.clear();
+    suffix_node->ready_seq_ids.clear();
     suffix_node->canonical_len = 0;
     suffix_node->ref_count = 0;
     suffix_node->last_access_tick = node->last_access_tick;
@@ -136,16 +178,18 @@ void RadixTree::split_node(RadixNode* node, size_t split_pos) {
 
 std::vector<RadixNode*> RadixTree::find_eviction_candidates(int32_t count) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
-    std::vector<RadixNode*> leaves;
+    std::vector<RadixNode*> candidates;
 
-    // BFS to find leaf nodes with ref_count == 0
+    // A split leaves physical seq_ids on its prefix, which is usually an
+    // internal node. Select every idle, non-root owner of physical KV data.
     std::vector<RadixNode*> stack = {root_.get()};
     while (!stack.empty()) {
         RadixNode* node = stack.back();
         stack.pop_back();
 
-        if (node->children.empty() && node->ref_count == 0 && node != root_.get()) {
-            leaves.push_back(node);
+        if (node != root_.get() && node->ref_count == 0 &&
+            !node->seq_ids.empty()) {
+            candidates.push_back(node);
         }
         for (auto& [key, child] : node->children) {
             stack.push_back(child.get());
@@ -153,39 +197,115 @@ std::vector<RadixNode*> RadixTree::find_eviction_candidates(int32_t count) {
     }
 
     // Sort by LRU (oldest access first)
-    std::sort(leaves.begin(), leaves.end(), [](RadixNode* a, RadixNode* b) {
+    std::sort(candidates.begin(), candidates.end(), [](RadixNode* a, RadixNode* b) {
         return a->last_access_tick < b->last_access_tick;
     });
 
-    if ((int32_t)leaves.size() > count) {
-        leaves.resize(count);
+    if ((int32_t)candidates.size() > count) {
+        candidates.resize(count);
     }
-    return leaves;
+    return candidates;
 }
 
-void RadixTree::evict(RadixNode* node) {
+std::vector<llama_seq_id> RadixTree::evict(RadixNode* node) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
-    if (!node || !node->parent) return;
+    if (!node || !node->parent || node->ref_count != 0 ||
+        node->seq_ids.empty()) {
+        return {};
+    }
+
+    std::vector<llama_seq_id> evicted(node->seq_ids.begin(), node->seq_ids.end());
+    node->seq_ids.clear();
+    node->ready_seq_ids.clear();
+    node->canonical_len = 0;
+
+    // Internal prefix nodes must remain in the tree. Future requests can still
+    // match them and safely recompute because they have no physical cache.
+    if (!node->children.empty()) return evicted;
 
     RadixNode* parent = node->parent;
     llama_token key = node->tokens[0];
     parent->children.erase(key);
+    return evicted;
+}
 
-    // If parent now has a single child and no references, merge them
-    if (parent->children.size() == 1 && parent != root_.get() && parent->ref_count == 0) {
-        auto it = parent->children.begin();
-        RadixNode* only_child = it->second.get();
-        parent->tokens.insert(parent->tokens.end(),
-                              only_child->tokens.begin(), only_child->tokens.end());
-        parent->seq_ids = only_child->seq_ids;
-        parent->canonical_len = only_child->canonical_len;
-        parent->ref_count = only_child->ref_count;
-        parent->last_access_tick = only_child->last_access_tick;
-        parent->children = std::move(only_child->children);
-        for (auto& [k, c] : parent->children) {
-            c->parent = parent;
+void RadixTree::register_seq_id(RadixNode* node, llama_seq_id seq_id,
+                                int32_t canonical_len) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    node->seq_ids.insert(seq_id);
+    if (node->canonical_len == 0) node->canonical_len = canonical_len;
+}
+
+void RadixTree::mark_seq_id_ready(RadixNode* node, llama_seq_id seq_id) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (node && node->seq_ids.count(seq_id) != 0) {
+        node->ready_seq_ids.insert(seq_id);
+    }
+}
+
+bool RadixTree::release_seq_id(RadixNode* node, llama_seq_id seq_id) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (!node) return true;
+
+    auto it = node->seq_ids.find(seq_id);
+    if (it == node->seq_ids.end()) return true;
+    const bool is_ready = node->ready_seq_ids.count(seq_id) != 0;
+    if (is_ready && node->seq_ids.size() <= 1) return false;
+
+    node->seq_ids.erase(it);
+    node->ready_seq_ids.erase(seq_id);
+    if (node->seq_ids.empty()) node->canonical_len = 0;
+    return true;
+}
+
+bool RadixTree::erase_seq_id(llama_seq_id seq_id) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    std::vector<RadixNode*> stack = {root_.get()};
+    while (!stack.empty()) {
+        RadixNode* node = stack.back();
+        stack.pop_back();
+
+        auto it = node->seq_ids.find(seq_id);
+        if (it != node->seq_ids.end()) {
+            node->seq_ids.erase(it);
+            node->ready_seq_ids.erase(seq_id);
+            if (node->seq_ids.empty()) node->canonical_len = 0;
+            return true;
+        }
+        for (auto& [key, child] : node->children) {
+            stack.push_back(child.get());
         }
     }
+    return false;
+}
+
+llama_seq_id RadixTree::find_covering_seq_id(
+    const RadixNode* node, int32_t* out_canonical_len) const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    return find_covering_seq_id_locked(node, out_canonical_len);
+}
+
+llama_seq_id RadixTree::find_covering_seq_id_locked(
+    const RadixNode* node, int32_t* out_canonical_len) const {
+    if (!node) return -1;
+    if (!node->ready_seq_ids.empty()) {
+        if (out_canonical_len) *out_canonical_len = node->canonical_len;
+        return *node->ready_seq_ids.begin();
+    }
+    if (node->parent && !node->parent->ready_seq_ids.empty()) {
+        if (out_canonical_len) *out_canonical_len = node->parent->canonical_len;
+        return *node->parent->ready_seq_ids.begin();
+    }
+    for (const auto& [key, child] : node->children) {
+        int32_t canonical_len = 0;
+        llama_seq_id seq_id =
+            find_covering_seq_id_locked(child.get(), &canonical_len);
+        if (seq_id != -1) {
+            if (out_canonical_len) *out_canonical_len = canonical_len;
+            return seq_id;
+        }
+    }
+    return -1;
 }
 
 int32_t RadixTree::active_sequence_count() const {
@@ -216,6 +336,13 @@ static std::string node_to_json(const RadixNode* node, int32_t cumulative_tokens
     s += "\"seq_ids\":[";
     bool first = true;
     for (auto sid : node->seq_ids) {
+        if (!first) s += ",";
+        s += std::to_string(sid);
+        first = false;
+    }
+    s += "],\"ready_seq_ids\":[";
+    first = true;
+    for (auto sid : node->ready_seq_ids) {
         if (!first) s += ",";
         s += std::to_string(sid);
         first = false;
