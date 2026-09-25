@@ -8,6 +8,7 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # --- Options ---
 option(RADIXFORGE_METAL "Enable Metal acceleration (macOS)" ON)
 option(RADIXFORGE_BUILD_TESTS "Build unit tests" ON)
+option(RADIXFORGE_BUILD_TOOLS "Build standalone feasibility tools" ON)
 
 # --- llama.cpp as subdirectory ---
 # Disable llama.cpp extras we don't need
@@ -59,6 +60,22 @@ if(APPLE AND RADIXFORGE_METAL)
 endif()
 
 target_compile_options(radixforge PRIVATE -Wall -Wextra -Wpedantic)
+
+if(RADIXFORGE_BUILD_TOOLS)
+    add_executable(chunk_spike tools/chunk_spike.cpp)
+    set_target_properties(chunk_spike PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tools"
+    )
+    target_include_directories(chunk_spike PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/vendor/llama.cpp/include
+    )
+    target_link_libraries(chunk_spike PRIVATE llama ggml)
+    target_compile_options(chunk_spike PRIVATE -Wall -Wextra -Wpedantic)
+    if(APPLE AND RADIXFORGE_METAL)
+        target_link_libraries(chunk_spike PRIVATE "-framework Metal" "-framework Foundation")
+    endif()
+endif()
 
 if(RADIXFORGE_BUILD_TESTS)
     enable_testing()
