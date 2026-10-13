@@ -75,6 +75,18 @@ if(RADIXFORGE_BUILD_TOOLS)
     if(APPLE AND RADIXFORGE_METAL)
         target_link_libraries(chunk_spike PRIVATE "-framework Metal" "-framework Foundation")
     endif()
+
+    add_executable(moe_trace tools/moe_trace.cpp)
+    set_target_properties(moe_trace PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tools"
+    )
+    target_include_directories(moe_trace PRIVATE
+        ${CMAKE_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/vendor/llama.cpp/include
+        ${CMAKE_SOURCE_DIR}/vendor/llama.cpp/ggml/include
+    )
+    target_link_libraries(moe_trace PRIVATE llama ggml ggml-base)
+    target_compile_options(moe_trace PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 if(RADIXFORGE_BUILD_TESTS)
