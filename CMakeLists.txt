@@ -32,7 +32,9 @@ add_executable(radixforge
     src/llama_bridge.cpp
     src/radix_tree.cpp
     src/kv_mapper.cpp
-    src/server.cpp
+    src/worker.cpp
+    src/openai_api.cpp
+    src/http_server.cpp
     vendor/llama.cpp/vendor/cpp-httplib/httplib.cpp
 )
 
