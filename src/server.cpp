@@ -642,27 +642,6 @@ void Server::start() {
         res.set_content(tree_.to_json(), "application/json");
     });
 
-    // /admin/seq/:id — force-evict a specific physical sequence (auth required)
-    svr.Delete(R"(/admin/seq/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
-        if (!check_admin_auth(config_, req, res)) return;
-        llama_seq_id target;
-        try { target = static_cast<llama_seq_id>(std::stoi(req.matches[1])); }
-        catch (...) {
-            res.status = 400;
-            res.set_content("{\"error\":\"invalid seq_id\"}", "application/json");
-            return;
-        }
-        bool ok = mapper_.force_evict_seq(target);
-        res.set_header("Access-Control-Allow-Origin", "*");
-        if (ok) {
-            res.set_content("{\"status\":\"evicted\",\"seq_id\":" +
-                            std::to_string(target) + "}", "application/json");
-        } else {
-            res.status = 404;
-            res.set_content("{\"error\":\"seq_id not found or already free\"}", "application/json");
-        }
-    });
-
     // Chat completions (non-streaming)
     auto handle_chat = [this](const httplib::Request& req_http,
                                httplib::Response& res) {
