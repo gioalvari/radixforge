@@ -89,7 +89,6 @@ jobs:
   e2e-determinism:
     needs: build-test
     runs-on: macos-15
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
