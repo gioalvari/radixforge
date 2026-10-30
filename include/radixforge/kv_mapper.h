@@ -7,6 +7,7 @@
 #include <atomic>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <vector>
@@ -31,11 +32,34 @@ struct CacheMetrics {
     CacheMetrics& operator=(const CacheMetrics&) = delete;
 };
 
+// Minimal KV-cache operations used by KVMapper. Tests can supply a recording
+// implementation without constructing a model context.
+class KvOps {
+public:
+    virtual ~KvOps() = default;
+    virtual void seq_cp(llama_seq_id src, llama_seq_id dst, int32_t p0,
+                        int32_t p1) = 0;
+    virtual void seq_rm(llama_seq_id seq_id, int32_t p0, int32_t p1) = 0;
+};
+
+class LlamaKvOps final : public KvOps {
+public:
+    explicit LlamaKvOps(LlamaBridge& bridge) : bridge_(bridge) {}
+
+    void seq_cp(llama_seq_id src, llama_seq_id dst, int32_t p0,
+                int32_t p1) override;
+    void seq_rm(llama_seq_id seq_id, int32_t p0, int32_t p1) override;
+
+private:
+    LlamaBridge& bridge_;
+};
+
 // Manages the mapping between logical Radix Tree nodes and physical
 // llama_seq_id slots in the KV cache.
 class KVMapper {
 public:
     KVMapper(LlamaBridge& bridge, RadixTree& tree, const Config& config);
+    KVMapper(KvOps& kv_ops, RadixTree& tree, const Config& config);
 
     // Prepare a sequence for generation:
     // 1. Find prefix match in the radix tree
@@ -45,7 +69,8 @@ public:
     struct PrepareResult {
         llama_seq_id seq_id;
         int32_t cached_pos;              // position up to which cache is valid
-        std::vector<llama_token> delta;  // tokens still needing decode
+        // Tokens still needing decode. delta is non-empty for non-empty prompts.
+        std::vector<llama_token> delta;
         RadixNode* leaf_node;
     };
 
@@ -61,9 +86,6 @@ public:
     // Release a physical seq_id back to the pool after generation is done.
     void release_sequence(llama_seq_id seq_id, RadixNode* node);
 
-    // Forcefully evict a specific seq_id (admin use only). Returns false if not found.
-    bool force_evict_seq(llama_seq_id seq_id);
-
     // Run proactive garbage collection (evict idle LRU sequences).
     void gc_if_needed();
 
@@ -78,7 +100,8 @@ public:
     const CacheMetrics& metrics() const { return metrics_; }
 
 private:
-    LlamaBridge& bridge_;
+    std::unique_ptr<KvOps> owned_kv_ops_;
+    KvOps& kv_ops_;
     RadixTree& tree_;
     Config config_;
 

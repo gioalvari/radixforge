@@ -47,7 +47,25 @@ void RadixTree::release(RadixNode* node) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     if (node && node->ref_count > 0) {
         node->ref_count--;
+        prune_empty_leaves_locked(node);
     }
+}
+
+void RadixTree::prune_empty_leaves_locked(RadixNode* node) {
+    while (node && node != root_.get() && node->ref_count == 0 &&
+           node->seq_ids.empty() && node->children.empty()) {
+        RadixNode* parent = node->parent;
+        parent->children.erase(node->tokens.front());
+        node = parent;
+    }
+}
+
+int32_t RadixTree::cumulative_token_depth(const RadixNode* node) {
+    int32_t depth = 0;
+    for (const RadixNode* current = node; current; current = current->parent) {
+        depth += static_cast<int32_t>(current->tokens.size());
+    }
+    return depth;
 }
 
 PrefixMatch RadixTree::find_prefix_locked(const std::vector<llama_token>& tokens) {
@@ -221,11 +239,8 @@ std::vector<llama_seq_id> RadixTree::evict(RadixNode* node) {
 
     // Internal prefix nodes must remain in the tree. Future requests can still
     // match them and safely recompute because they have no physical cache.
-    if (!node->children.empty()) return evicted;
-
-    RadixNode* parent = node->parent;
-    llama_token key = node->tokens[0];
-    parent->children.erase(key);
+    // Empty leaves (and any newly-empty ancestors) are no longer useful.
+    prune_empty_leaves_locked(node);
     return evicted;
 }
 
@@ -245,10 +260,10 @@ void RadixTree::mark_seq_id_ready(RadixNode* node, llama_seq_id seq_id) {
 
 bool RadixTree::release_seq_id(RadixNode* node, llama_seq_id seq_id) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
-    if (!node) return true;
+    if (!node) return false;
 
     auto it = node->seq_ids.find(seq_id);
-    if (it == node->seq_ids.end()) return true;
+    if (it == node->seq_ids.end()) return false;
     const bool is_ready = node->ready_seq_ids.count(seq_id) != 0;
     if (is_ready && node->seq_ids.size() <= 1) return false;
 
@@ -256,27 +271,6 @@ bool RadixTree::release_seq_id(RadixNode* node, llama_seq_id seq_id) {
     node->ready_seq_ids.erase(seq_id);
     if (node->seq_ids.empty()) node->canonical_len = 0;
     return true;
-}
-
-bool RadixTree::erase_seq_id(llama_seq_id seq_id) {
-    std::unique_lock<std::shared_mutex> lock(mutex_);
-    std::vector<RadixNode*> stack = {root_.get()};
-    while (!stack.empty()) {
-        RadixNode* node = stack.back();
-        stack.pop_back();
-
-        auto it = node->seq_ids.find(seq_id);
-        if (it != node->seq_ids.end()) {
-            node->seq_ids.erase(it);
-            node->ready_seq_ids.erase(seq_id);
-            if (node->seq_ids.empty()) node->canonical_len = 0;
-            return true;
-        }
-        for (auto& [key, child] : node->children) {
-            stack.push_back(child.get());
-        }
-    }
-    return false;
 }
 
 llama_seq_id RadixTree::find_covering_seq_id(
@@ -288,13 +282,14 @@ llama_seq_id RadixTree::find_covering_seq_id(
 llama_seq_id RadixTree::find_covering_seq_id_locked(
     const RadixNode* node, int32_t* out_canonical_len) const {
     if (!node) return -1;
-    if (!node->ready_seq_ids.empty()) {
-        if (out_canonical_len) *out_canonical_len = node->canonical_len;
-        return *node->ready_seq_ids.begin();
-    }
-    if (node->parent && !node->parent->ready_seq_ids.empty()) {
-        if (out_canonical_len) *out_canonical_len = node->parent->canonical_len;
-        return *node->parent->ready_seq_ids.begin();
+    for (const RadixNode* ancestor = node; ancestor; ancestor = ancestor->parent) {
+        if (!ancestor->ready_seq_ids.empty()) {
+            if (out_canonical_len) {
+                *out_canonical_len = std::min(ancestor->canonical_len,
+                                              cumulative_token_depth(ancestor));
+            }
+            return *ancestor->ready_seq_ids.begin();
+        }
     }
     for (const auto& [key, child] : node->children) {
         int32_t canonical_len = 0;

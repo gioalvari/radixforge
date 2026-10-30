@@ -5,8 +5,26 @@
 
 namespace radixforge {
 
+void LlamaKvOps::seq_cp(llama_seq_id src, llama_seq_id dst, int32_t p0,
+                        int32_t p1) {
+    bridge_.memory_seq_cp(src, dst, p0, p1);
+}
+
+void LlamaKvOps::seq_rm(llama_seq_id seq_id, int32_t p0, int32_t p1) {
+    bridge_.memory_seq_rm(seq_id, p0, p1);
+}
+
 KVMapper::KVMapper(LlamaBridge& bridge, RadixTree& tree, const Config& config)
-    : bridge_(bridge), tree_(tree), config_(config) {
+    : owned_kv_ops_(std::make_unique<LlamaKvOps>(bridge)),
+      kv_ops_(*owned_kv_ops_), tree_(tree), config_(config) {
+    // Initialize free seq_id pool (0 is reserved for scratch)
+    for (int32_t i = 1; i < config.max_sequences; i++) {
+        free_seq_ids_.push_back(i);
+    }
+}
+
+KVMapper::KVMapper(KvOps& kv_ops, RadixTree& tree, const Config& config)
+    : kv_ops_(kv_ops), tree_(tree), config_(config) {
     // Initialize free seq_id pool (0 is reserved for scratch)
     for (int32_t i = 1; i < config.max_sequences; i++) {
         free_seq_ids_.push_back(i);
@@ -24,10 +42,9 @@ KVMapper::PrepareResult KVMapper::prepare_sequence(
     llama_seq_id new_seq = -1;
     int32_t cached_pos = 0;
     try {
-        // Hold the mapper lock while choosing/copying a ready source. This
-        // serializes admin eviction with source selection; every nested tree
-        // operation follows the mapper -> tree lock order documented in the
-        // header.
+        // Hold the mapper lock while choosing and copying a ready source.
+        // Every nested tree operation follows the mapper -> tree lock order
+        // documented in the header.
         std::lock_guard<std::mutex> lock(mutex_);
         // Allocate before changing the tree's physical registration. If the pool
         // is exhausted, release the reference acquired by insert() below.
@@ -41,10 +58,18 @@ KVMapper::PrepareResult KVMapper::prepare_sequence(
             : -1;
         cached_pos = src_seq != -1 ? std::min(match.matched_tokens, source_len) : 0;
 
+        // A non-empty full hit still decodes its final prompt token to obtain
+        // logits. Copy only the preceding KV cells so that token is decoded at
+        // its original position instead of being duplicated at position n.
+        if (!prompt_tokens.empty() &&
+            cached_pos == static_cast<int32_t>(prompt_tokens.size())) {
+            --cached_pos;
+        }
+
         if (cached_pos > 0) {
             // kv_unified puts every seq_id in one stream. llama.cpp therefore
             // tags just this prefix's existing cells with new_seq (zero-copy).
-            bridge_.memory_seq_cp(src_seq, new_seq, 0, cached_pos);
+            kv_ops_.seq_cp(src_seq, new_seq, 0, cached_pos);
             metrics_.hits.fetch_add(1, std::memory_order_relaxed);
             RF_DEBUG("kv_mapper", "KV cache hit: copied %d tokens from seq %d -> seq %d",
                      cached_pos, src_seq, new_seq);
@@ -59,10 +84,10 @@ KVMapper::PrepareResult KVMapper::prepare_sequence(
         }
 
         tree_.register_seq_id(match.node, new_seq,
-                              static_cast<int32_t>(prompt_tokens.size()));
+                               static_cast<int32_t>(prompt_tokens.size()));
     } catch (...) {
         if (new_seq != -1) {
-            bridge_.memory_seq_rm(new_seq, 0, -1);
+            kv_ops_.seq_rm(new_seq, 0, -1);
             std::lock_guard<std::mutex> lock(mutex_);
             free_seq_ids_.push_back(new_seq);
         }
@@ -94,8 +119,13 @@ void KVMapper::release_sequence(llama_seq_id seq_id, RadixNode* node) {
 
     bool should_free = tree_.release_seq_id(node, seq_id);
     if (should_free) {
-        bridge_.memory_seq_rm(seq_id, 0, -1);
+        kv_ops_.seq_rm(seq_id, 0, -1);
         free_seq_ids_.push_back(seq_id);
+    } else {
+        int32_t canonical_len = 0;
+        if (tree_.find_covering_seq_id(node, &canonical_len) == seq_id) {
+            kv_ops_.seq_rm(seq_id, canonical_len, -1);
+        }
     }
 }
 
@@ -141,7 +171,7 @@ bool KVMapper::evict_one_locked() {
         if (evicted.empty()) continue;
 
         for (llama_seq_id sid : evicted) {
-            bridge_.memory_seq_rm(sid, 0, -1);
+            kv_ops_.seq_rm(sid, 0, -1);
             free_seq_ids_.push_back(sid);
             RF_DEBUG("kv_mapper", "Evicted seq %d (LRU)", sid);
         }
@@ -153,24 +183,6 @@ bool KVMapper::evict_one_locked() {
 void KVMapper::defrag() {
     // Proactive GC every N requests keeps the pool healthy.
     gc_if_needed();
-}
-
-bool KVMapper::force_evict_seq(llama_seq_id target_seq) {
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    // Also check free_seq_ids — seq might already be freed
-    for (auto id : free_seq_ids_) {
-        if (id == target_seq) return false;  // already free, nothing to do
-    }
-
-    bridge_.memory_seq_rm(target_seq, 0, -1);
-    free_seq_ids_.push_back(target_seq);
-    metrics_.evictions.fetch_add(1, std::memory_order_relaxed);
-
-    tree_.erase_seq_id(target_seq);
-
-    RF_INFO("kv_mapper", "Admin: force-evicted seq %d", target_seq);
-    return true;
 }
 
 } // namespace radixforge

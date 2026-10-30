@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <thread>
 #include <vector>
 
 static int g_pass = 0;
@@ -110,7 +111,9 @@ static void test_release_decrements_ref_count() {
     int before = m.node->ref_count;
     CHECK(before == 1,               "insert increments ref_count to 1");
     tree.release(m.node);
-    CHECK(m.node->ref_count == 0,    "release decrements ref_count to 0");
+    auto next = tree.insert(tok({5, 6, 7}));
+    CHECK(next.matched_tokens == 0,  "release prunes an unowned leaf");
+    tree.release(next.node);
 }
 
 static void test_eviction_candidates() {
@@ -168,7 +171,7 @@ static void test_split_prefix_is_evictable() {
     auto evicted = tree.evict(original.node);
     CHECK(evicted.size() == 1 && evicted[0] == 42,
           "eviction invalidates the internal node's seq_id");
-    CHECK(original.node->children.size() == 2,
+    CHECK(!original.node->children.empty(),
           "eviction keeps internal prefix structure for recomputation");
     CHECK(tree.find_covering_seq_id(original.node) == -1,
           "invalidated seq_id is not returned as a cache hit");
@@ -223,6 +226,80 @@ static void test_active_references_are_not_evictable() {
           "released sequence becomes an eviction candidate");
 }
 
+static void test_ancestor_cache_coverage_stops_at_ancestor_depth() {
+    printf("\n[test_ancestor_cache_coverage_stops_at_ancestor_depth]\n");
+    radixforge::RadixTree tree;
+
+    auto a = tree.insert(tok({1, 2, 3, 4}));
+    tree.register_seq_id(a.node, 11, 4);
+    tree.mark_seq_id_ready(a.node, 11);
+    tree.release(a.node);
+
+    auto b = tree.insert(tok({1, 2, 5, 6}));
+    tree.register_seq_id(b.node, 22, 4);
+    tree.mark_seq_id_ready(b.node, 22);
+    tree.release(b.node);
+
+    auto d = tree.insert(tok({1, 2, 5, 6, 7}));
+    auto evicted = tree.evict(b.node);
+    CHECK(evicted.size() == 1 && evicted[0] == 22,
+          "branch cache is evicted while its child keeps its logical prefix");
+
+    auto c = tree.insert(tok({1, 2, 5, 6, 8}));
+    int32_t canonical_len = 0;
+    CHECK(tree.find_covering_seq_id(c.node, &canonical_len) == 11,
+          "falls back to the shared-prefix ready sequence");
+    CHECK(canonical_len == 2,
+          "ancestor source coverage is capped at its cumulative token depth");
+    tree.release(c.node);
+    tree.release(d.node);
+}
+
+static void test_empty_leaves_are_pruned() {
+    printf("\n[test_empty_leaves_are_pruned]\n");
+    radixforge::RadixTree tree;
+    auto first = tree.insert(tok({3, 4, 5}));
+    tree.release(first.node);
+    auto second = tree.insert(tok({3, 4, 5}));
+    CHECK(second.matched_tokens == 0,
+          "released leaf without sequences is removed from the logical tree");
+    tree.release(second.node);
+
+    auto cached = tree.insert(tok({7, 8, 9}));
+    tree.register_seq_id(cached.node, 33, 3);
+    tree.release(cached.node);
+    auto evicted = tree.evict(cached.node);
+    CHECK(evicted.size() == 1 && evicted[0] == 33,
+          "idle leaf sequence is evicted");
+    auto after_evict = tree.insert(tok({7, 8, 9}));
+    CHECK(after_evict.matched_tokens == 0,
+          "evicting a sequence-only leaf prunes the empty leaf");
+    tree.release(after_evict.node);
+}
+
+static void test_concurrent_insert_release_stress() {
+    printf("\n[test_concurrent_insert_release_stress]\n");
+    radixforge::RadixTree tree;
+    constexpr int kThreads = 4;
+    constexpr int kIterations = 100;
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+    for (int thread_index = 0; thread_index < kThreads; ++thread_index) {
+        threads.emplace_back([&tree, thread_index] {
+            for (int i = 0; i < kIterations; ++i) {
+                auto match = tree.insert(tok({thread_index, i, i + 1}));
+                const llama_seq_id seq_id = thread_index * kIterations + i + 1;
+                tree.register_seq_id(match.node, seq_id, 3);
+                tree.release_seq_id(match.node, seq_id);
+                tree.release(match.node);
+            }
+        });
+    }
+    for (auto& thread : threads) thread.join();
+    CHECK(tree.active_sequence_count() == 0,
+          "concurrent insert/release leaves no registered sequences");
+}
+
 static void test_to_json() {
     printf("\n[test_to_json]\n");
     radixforge::RadixTree tree;
@@ -255,6 +332,9 @@ int main() {
     test_split_prefix_is_evictable();
     test_pending_sequences_are_not_cache_sources();
     test_active_references_are_not_evictable();
+    test_ancestor_cache_coverage_stops_at_ancestor_depth();
+    test_empty_leaves_are_pruned();
+    test_concurrent_insert_release_stress();
     test_to_json();
 
     printf("\n─────────────────────────────\n");

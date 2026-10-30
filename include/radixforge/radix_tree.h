@@ -20,9 +20,9 @@ struct RadixNode {
     std::set<llama_seq_id> seq_ids;
     std::set<llama_seq_id> ready_seq_ids;
     uint64_t last_access_tick = 0;
-    // Length of the canonical KV sequence at the time it was established.
-    // Used to trim the canonical seq back to this boundary after a full-cache-hit
-    // decode_single (which appends one extra position that must not accumulate).
+    // Length of the canonical prompt KV sequence at the time it was established.
+    // Used to trim a retained canonical sequence after generated tokens are
+    // released, so only its prompt-prefix cache remains.
     int32_t canonical_len = 0;
 
     bool has_physical_cache() const { return !ready_seq_ids.empty(); }
@@ -78,10 +78,9 @@ public:
     // sequence is retained as the canonical cache entry; pending sequences
     // are always removed and freed.
     void register_seq_id(RadixNode* node, llama_seq_id seq_id,
-                          int32_t canonical_len);
+                           int32_t canonical_len);
     void mark_seq_id_ready(RadixNode* node, llama_seq_id seq_id);
     bool release_seq_id(RadixNode* node, llama_seq_id seq_id);
-    bool erase_seq_id(llama_seq_id seq_id);
 
     // Find a physical sequence covering node's prefix under the tree lock.
     // Evicted ids are removed before this method can return them.
@@ -104,6 +103,8 @@ private:
     PrefixMatch find_prefix_locked(const std::vector<llama_token>& tokens);
     PrefixAvailability inspect_prefix_locked(const std::vector<llama_token>& tokens) const;
     void split_node(RadixNode* node, size_t split_pos);
+    void prune_empty_leaves_locked(RadixNode* node);
+    static int32_t cumulative_token_depth(const RadixNode* node);
     llama_seq_id find_covering_seq_id_locked(
         const RadixNode* node, int32_t* out_canonical_len) const;
     static void consider_availability(const RadixNode* node, int32_t covered,
