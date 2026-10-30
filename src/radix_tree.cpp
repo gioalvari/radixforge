@@ -1,6 +1,8 @@
 #include "radixforge/radix_tree.h"
 
 #include <algorithm>
+#include <mutex>
+#include <shared_mutex>
 #include <string>
 
 namespace radixforge {
