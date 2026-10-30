@@ -30,6 +30,7 @@ static void print_usage(const char* prog) {
         "  --max-seq <n>              Max concurrent sequences (default: 32)\n"
         "  --admit-window-ms <n>      Idle request coalescing window (default: 2)\n"
         "  --request-timeout <seconds> Non-streaming request timeout (default: 300)\n"
+        "  --kv-high-watermark <0..1> Evict idle KV above this context fraction (default: 0.9)\n"
         "  --admin-token <token>      Bearer token for /admin/* endpoints (default: none)\n"
         "  --log-level <level>        Log level: debug|info|warn|error (default: info)\n"
         "\n", prog);
@@ -57,6 +58,13 @@ int main(int argc, char** argv) {
             config.admit_window_ms = std::max(0, std::atoi(argv[++i]));
         } else if (arg == "--request-timeout" && i + 1 < argc) {
             config.request_timeout_seconds = std::max(1, std::atoi(argv[++i]));
+        } else if (arg == "--kv-high-watermark" && i + 1 < argc) {
+            const float value = std::strtof(argv[++i], nullptr);
+            if (value <= 0.0f || value > 1.0f) {
+                print_usage(argv[0]);
+                return 1;
+            }
+            config.kv_high_watermark = value;
         } else if ((arg == "-b" || arg == "--batch-size") && i + 1 < argc) {
             config.n_batch = std::atoi(argv[++i]);
         } else if (arg == "--admin-token" && i + 1 < argc) {

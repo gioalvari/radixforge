@@ -316,6 +316,7 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
     for (int i = 0; i < decoding; ++i) {
         ActiveSeq& seq = seqs[i];
         seq.cached_tokens.push_back(seq.next_token);
+        mapper_.set_sequence_cell_count(seq.seq_id, seq.pos + 1);
         llama_token new_tok = llama_sampler_sample(seq.sampler, bridge_.ctx(), i);
         if (llama_vocab_is_eog(bridge_.vocab(), new_tok)) {
             seq.done = true;

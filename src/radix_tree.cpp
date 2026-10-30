@@ -356,6 +356,38 @@ int32_t RadixTree::active_sequence_count() const {
     return count;
 }
 
+int32_t RadixTree::retained_sequence_count() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    int32_t count = 0;
+    std::vector<const RadixNode*> stack = {root_.get()};
+    while (!stack.empty()) {
+        const RadixNode* node = stack.back();
+        stack.pop_back();
+        if (node->ref_count == 0) {
+            count += static_cast<int32_t>(node->ready_seq_ids.size());
+        }
+        for (const auto& [key, child] : node->children) {
+            stack.push_back(child.get());
+        }
+    }
+    return count;
+}
+
+int32_t RadixTree::node_count() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    int32_t count = 0;
+    std::vector<const RadixNode*> stack = {root_.get()};
+    while (!stack.empty()) {
+        const RadixNode* node = stack.back();
+        stack.pop_back();
+        ++count;
+        for (const auto& [key, child] : node->children) {
+            stack.push_back(child.get());
+        }
+    }
+    return count;
+}
+
 // --- JSON serialization ---
 
 static std::string node_to_json(const RadixNode* node, int32_t cumulative_tokens) {
