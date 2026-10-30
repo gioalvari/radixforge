@@ -5,25 +5,21 @@ import argparse
 import json
 import os
 import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKLOAD = ROOT / "data" / "spec_workload.jsonl"
 RAW_DIR = Path("/tmp/spec_study")
 MODEL = Path(
-    os.environ.get(
-        "RADIXFORGE_MODEL", "~/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf"
-    )
+    os.environ.get("RADIXFORGE_MODEL", "~/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf")
 ).expanduser()
 SEED = 20260925
 PORT = 18080
-CONFIGS: Dict[str, List[str]] = {
+CONFIGS: dict[str, list[str]] = {
     "none": ["--spec-type", "none"],
     "ngram_mod": ["--spec-type", "ngram-mod"],
     "ngram_simple": ["--spec-type", "ngram-simple"],
@@ -31,7 +27,7 @@ CONFIGS: Dict[str, List[str]] = {
 }
 
 
-def request(path: str, payload: Dict[str, Any], timeout: int = 180) -> Dict[str, Any]:
+def request(path: str, payload: dict[str, Any], timeout: int = 180) -> dict[str, Any]:
     """Send a JSON request to the local server."""
     body = json.dumps(payload).encode("utf-8")
     try:
@@ -68,7 +64,7 @@ def wait_for_server(process: subprocess.Popen[Any], log: Any) -> None:
     raise RuntimeError("llama-server did not become healthy in 300 seconds")
 
 
-def tokenize_content(content: str) -> List[int]:
+def tokenize_content(content: str) -> list[int]:
     """Tokenize text through the server's model tokenizer."""
     result = request("/tokenize", {"content": content})
     tokens = result.get("tokens", [])
@@ -77,7 +73,7 @@ def tokenize_content(content: str) -> List[int]:
     return [int(token) for token in tokens]
 
 
-def render_prompt(messages: List[Dict[str, str]]) -> str:
+def render_prompt(messages: list[dict[str, str]]) -> str:
     """Render messages with the loaded model's template."""
     result = request(
         "/apply-template", {"messages": messages, "add_generation_prompt": True}
@@ -88,7 +84,7 @@ def render_prompt(messages: List[Dict[str, str]]) -> str:
     return content
 
 
-def extract_content(response: Dict[str, Any]) -> str:
+def extract_content(response: dict[str, Any]) -> str:
     """Extract standard OpenAI completion text."""
     choices = response.get("choices")
     if not isinstance(choices, list) or not choices:
@@ -100,7 +96,7 @@ def extract_content(response: Dict[str, Any]) -> str:
     return content
 
 
-def run_config(name: str, records: List[Dict[str, Any]]) -> None:
+def run_config(name: str, records: list[dict[str, Any]]) -> None:
     """Run one spec configuration against all requests on a fresh server."""
     RAW_DIR.mkdir(parents=True, exist_ok=True)
     log_path = RAW_DIR / f"server_{name}.log"

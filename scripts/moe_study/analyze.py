@@ -155,7 +155,7 @@ def simulate(
     n_layers = reqs[0].routes.shape[1]
     caches = [OrderedDict() for _ in range(n_layers)]
     misses = prefetch = accesses = 0
-    for r, prof in zip(reqs, profiles):
+    for r, prof in zip(reqs, profiles, strict=True):
         if policy.startswith("prefetch:"):
             p = prof[policy.split(":", 1)[1]]
             if p.sum() > 0:
@@ -242,7 +242,7 @@ def main() -> None:
         f"requests={len(reqs)} decode_tokens={n_dec} radix_hits={hit} (min_lcp={args.min_lcp})"
     )
     print(
-        f"mean cached prefix share: {np.mean([p['cached'] / r.n_prompt for p, r in zip(profiles, reqs)]):.1%}"
+        f"mean cached prefix share: {np.mean([p['cached'] / r.n_prompt for p, r in zip(profiles, reqs, strict=True)]):.1%}"
     )
 
     names = ["global", "node", "delta", "node+delta", "full_prefill"]
@@ -254,7 +254,7 @@ def main() -> None:
         for name in names:
             vals = [
                 recall_at(p[name], r.decode, c)
-                for p, r in zip(profiles, reqs)
+                for p, r in zip(profiles, reqs, strict=True)
                 if p["cached"]
             ]
             cells.append(f"{np.nanmean(vals):.3f}")
@@ -307,7 +307,7 @@ def main() -> None:
     print("|---" * (len(fams) + 1) + "|")
     for a in fams:
         row = [
-            f"{np.mean([len(x & y) / len(x | y) for x, y in zip(top[a], top[b])]):.2f}"
+            f"{np.mean([len(x & y) / len(x | y) for x, y in zip(top[a], top[b], strict=True)]):.2f}"
             for b in fams
         ]
         print(f"| {a} | " + " | ".join(row) + " |")
