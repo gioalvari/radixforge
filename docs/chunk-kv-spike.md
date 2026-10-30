@@ -27,7 +27,7 @@ Run command:
 
 ```sh
 ./build/tools/chunk_spike \
-  -m ~/local-llm-bench/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf \
+  -m models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf \
   --data data/hotpot_dev_100.jsonl --n 100 \
   --variants full,naive,prefixed,prefixed+r8,prefixed+r16,prefixed+r32,prefixed+r64,naive+r16,prefixed+rALL \
   --out /tmp/spike-0.5b.jsonl

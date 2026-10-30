@@ -2,6 +2,7 @@
 """Build the deterministic cross-request speculation workload."""
 
 import json
+import os
 import random
 from pathlib import Path
 from typing import Any, Dict, List
@@ -11,7 +12,9 @@ SEED = 20260925
 COUNT_PER_FAMILY = 25
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "data" / "spec_workload.jsonl"
-SOURCE_ROOT = Path("~/Project/personal/local-llm-bench-prefix")
+SOURCE_ROOT = Path(
+    os.environ.get("SPEC_SOURCE_ROOT", "~/local-llm-bench-prefix")
+).expanduser()
 
 TOOLS = [
     {

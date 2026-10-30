@@ -2,12 +2,17 @@
 """Measure target verification cost by speculative draft length."""
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
 
 
-MODEL = Path("~/local-llm-bench/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf")
+MODEL = Path(
+    os.environ.get(
+        "RADIXFORGE_MODEL", "~/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+    )
+).expanduser()
 OUT = Path("/tmp/spec_study/cost_curve.json")
 
 

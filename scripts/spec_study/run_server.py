@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -15,7 +16,11 @@ from typing import Any, Dict, List, Optional
 ROOT = Path(__file__).resolve().parents[2]
 WORKLOAD = ROOT / "data" / "spec_workload.jsonl"
 RAW_DIR = Path("/tmp/spec_study")
-MODEL = Path("~/local-llm-bench/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf")
+MODEL = Path(
+    os.environ.get(
+        "RADIXFORGE_MODEL", "~/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf"
+    )
+).expanduser()
 SEED = 20260925
 PORT = 18080
 CONFIGS: Dict[str, List[str]] = {
