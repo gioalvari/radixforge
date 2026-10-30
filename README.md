@@ -75,6 +75,10 @@ CMake options:
 | `RADIXFORGE_METAL` | `ON` | Enable llama.cpp Metal acceleration on macOS. |
 | `RADIXFORGE_BUILD_TESTS` | `ON` | Build and register unit tests. |
 | `RADIXFORGE_BUILD_TOOLS` | `ON` | Build standalone research tools. |
+| `RADIXFORGE_UNIT_TESTS_ONLY` | `OFF` | Build only the unit tests, without compiling llama.cpp or the server. |
+| `RADIXFORGE_WERROR` | `OFF` | Treat project warnings (`-Wall -Wextra -Wpedantic`) as errors. CI enables it. |
+| `RADIXFORGE_SANITIZE` | empty | Sanitizers for project targets: `address,undefined` or `thread`. |
+| `RADIXFORGE_E2E_MODEL` | empty | Path to a GGUF model; when set, registers the end-to-end determinism test. |
 
 ```bash
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
@@ -82,7 +86,29 @@ cmake --build build -j 5
 ctest --test-dir build --output-on-failure
 ```
 
-The test suite includes radix-tree unit tests and `KVMapper` lifecycle tests using the `KvOps` test abstraction. Run the commands above locally before changing cache behavior.
+Tests:
+
+- `test_radix_tree`: radix-tree unit tests, including the ancestor-cap and leaf-pruning regressions and a concurrency stress test.
+- `test_kv_mapper`: `KVMapper` lifecycle tests against a fake `KvOps`, with no model needed (sequence-ID accounting, full-hit delta, trimming, multi-turn extension).
+- `e2e_determinism`: starts the server and checks that temperature-0 output for a prompt is the same cold, after sibling prompts, on a repeat, and after eviction.
+
+Fast unit-test loop with sanitizers (no llama.cpp build):
+
+```bash
+cmake -B build-asan -S . -DRADIXFORGE_UNIT_TESTS_ONLY=ON -DRADIXFORGE_SANITIZE=address,undefined
+cmake --build build-asan -j 5 && ctest --test-dir build-asan --output-on-failure
+```
+
+End-to-end test with a tiny model:
+
+```bash
+curl -L -o /tmp/stories260K.gguf \
+  https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories260K.gguf
+cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DRADIXFORGE_E2E_MODEL=/tmp/stories260K.gguf
+cmake --build build -j 5 && ctest --test-dir build --output-on-failure
+```
+
+CI (GitHub Actions) runs the full macOS build and tests with ccache, Linux unit tests under ASan+UBSan and under TSan, a lint job (clang-format and ruff, not blocking yet), and the e2e determinism test on macOS (not blocking yet).
 
 ## Server configuration
 
