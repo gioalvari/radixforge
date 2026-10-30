@@ -71,6 +71,35 @@ void Server::start() {
         res.set_content(buf, "application/json");
     });
 
+    svr.Get("/metrics", [this](const httplib::Request&, httplib::Response& res) {
+        const CacheMetrics& metrics = mapper_.metrics();
+        const std::string body =
+            "# TYPE radixforge_requests_total counter\n"
+            "radixforge_requests_total " +
+            std::to_string(metrics.total_requests.load(std::memory_order_relaxed)) + "\n"
+            "# TYPE radixforge_cache_hit_tokens_total counter\n"
+            "radixforge_cache_hit_tokens_total " +
+            std::to_string(metrics.cache_hit_tokens.load(std::memory_order_relaxed)) + "\n"
+            "# TYPE radixforge_prompt_tokens_total counter\n"
+            "radixforge_prompt_tokens_total " +
+            std::to_string(metrics.prompt_tokens.load(std::memory_order_relaxed)) + "\n"
+            "# TYPE radixforge_evictions_total counter\n"
+            "radixforge_evictions_total " +
+            std::to_string(metrics.evictions.load(std::memory_order_relaxed)) + "\n"
+            "# TYPE radixforge_active_sequences gauge\n"
+            "radixforge_active_sequences " +
+            std::to_string(mapper_.active_sequence_count()) + "\n"
+            "# TYPE radixforge_retained_sequences gauge\n"
+            "radixforge_retained_sequences " +
+            std::to_string(mapper_.retained_sequence_count()) + "\n"
+            "# TYPE radixforge_kv_cells_used gauge\n"
+            "radixforge_kv_cells_used " + std::to_string(mapper_.kv_cells_used()) + "\n"
+            "# TYPE radixforge_tree_nodes gauge\n"
+            "radixforge_tree_nodes " + std::to_string(tree_.node_count()) + "\n";
+        res.set_header("Access-Control-Allow-Origin", "*");
+        res.set_content(body, "text/plain; version=0.0.4; charset=utf-8");
+    });
+
     // /admin/stats — cache metrics and worker state (auth required if admin_token set)
     svr.Get("/admin/stats", [this](const httplib::Request& req, httplib::Response& res) {
         if (!check_admin_auth(config_, req, res)) return;

@@ -273,6 +273,44 @@ bool RadixTree::release_seq_id(RadixNode* node, llama_seq_id seq_id) {
     return true;
 }
 
+RadixNode* RadixTree::extend_seq_id(RadixNode* node, llama_seq_id seq_id,
+                                    const std::vector<llama_token>& tokens,
+                                    int32_t canonical_len) {
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (!node || tokens.empty() || canonical_len <= 0 ||
+        canonical_len > static_cast<int32_t>(tokens.size()) ||
+        node->seq_ids.count(seq_id) == 0 || node->ready_seq_ids.count(seq_id) == 0) {
+        return node;
+    }
+
+    PrefixMatch match = find_prefix_locked(tokens);
+    if (!match.remaining.empty()) {
+        auto new_leaf = std::make_unique<RadixNode>();
+        new_leaf->tokens = match.remaining;
+        new_leaf->parent = match.node;
+        new_leaf->last_access_tick = ++tick_;
+        const llama_token key = match.remaining.front();
+        match.node->children[key] = std::move(new_leaf);
+        match.node = match.node->children[key].get();
+    }
+
+    RadixNode* target = match.node;
+    if (target == node) {
+        node->canonical_len = canonical_len;
+        return node;
+    }
+
+    node->seq_ids.erase(seq_id);
+    node->ready_seq_ids.erase(seq_id);
+    if (node->seq_ids.empty()) node->canonical_len = 0;
+
+    target->seq_ids.insert(seq_id);
+    target->ready_seq_ids.insert(seq_id);
+    target->canonical_len = canonical_len;
+    target->last_access_tick = ++tick_;
+    return target;
+}
+
 llama_seq_id RadixTree::find_covering_seq_id(
     const RadixNode* node, int32_t* out_canonical_len) const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
@@ -312,6 +350,38 @@ int32_t RadixTree::active_sequence_count() const {
         stack.pop_back();
         count += (int32_t)node->seq_ids.size();
         for (auto& [key, child] : node->children) {
+            stack.push_back(child.get());
+        }
+    }
+    return count;
+}
+
+int32_t RadixTree::retained_sequence_count() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    int32_t count = 0;
+    std::vector<const RadixNode*> stack = {root_.get()};
+    while (!stack.empty()) {
+        const RadixNode* node = stack.back();
+        stack.pop_back();
+        if (node->ref_count == 0) {
+            count += static_cast<int32_t>(node->ready_seq_ids.size());
+        }
+        for (const auto& [key, child] : node->children) {
+            stack.push_back(child.get());
+        }
+    }
+    return count;
+}
+
+int32_t RadixTree::node_count() const {
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    int32_t count = 0;
+    std::vector<const RadixNode*> stack = {root_.get()};
+    while (!stack.empty()) {
+        const RadixNode* node = stack.back();
+        stack.pop_back();
+        ++count;
+        for (const auto& [key, child] : node->children) {
             stack.push_back(child.get());
         }
     }

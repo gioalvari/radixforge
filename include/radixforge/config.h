@@ -15,6 +15,7 @@ struct Config {
     // Radix Tree / Sequences
     int32_t max_sequences = 32;     // max concurrent llama_seq_id
     int32_t gc_watermark  = 28;     // trigger LRU eviction above this
+    float kv_high_watermark = 0.9f; // evict idle KV prefixes above this n_ctx fraction
 
     // Server
     std::string host = "127.0.0.1";

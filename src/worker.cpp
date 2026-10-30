@@ -157,6 +157,11 @@ void InferenceWorker::defer_to_front(std::vector<InferenceRequest>& deferred) {
 
 // ── Fused continuous-batch step ─────────────────────────────────────────────
 void InferenceWorker::retire(ActiveSeq& seq, bool notify_client) {
+    RadixNode* sequence_node = seq.leaf_node;
+    if (notify_client && !is_cancelled(seq.req)) {
+        sequence_node = mapper_.extend_sequence(seq.seq_id, seq.leaf_node,
+                                                seq.cached_tokens);
+    }
     if (notify_client && seq.req.on_token && !is_cancelled(seq.req)) {
         const auto finished = std::chrono::steady_clock::now();
         seq.stats.predicted_ms = std::chrono::duration<double, std::milli>(
@@ -164,7 +169,7 @@ void InferenceWorker::retire(ActiveSeq& seq, bool notify_client) {
         seq.req.on_token("", true, &seq.stats);
     }
     LlamaBridge::free_sampler(seq.sampler);
-    mapper_.release_sequence(seq.seq_id, seq.leaf_node);
+    mapper_.release_sequence(seq.seq_id, sequence_node);
     tree_.release(seq.leaf_node);
 }
 
@@ -310,6 +315,8 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
     const auto now = std::chrono::steady_clock::now();
     for (int i = 0; i < decoding; ++i) {
         ActiveSeq& seq = seqs[i];
+        seq.cached_tokens.push_back(seq.next_token);
+        mapper_.set_sequence_cell_count(seq.seq_id, seq.pos + 1);
         llama_token new_tok = llama_sampler_sample(seq.sampler, bridge_.ctx(), i);
         if (llama_vocab_is_eog(bridge_.vocab(), new_tok)) {
             seq.done = true;
@@ -399,6 +406,7 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
         seq.stats = ctx.stats;
         seq.req = std::move(ctx.req);
         seq.generation_started_at = now;
+        seq.cached_tokens = std::move(ctx.tokens);
         newly_active.push_back(std::move(seq));
         completed_prefills.push_back(index);
     }

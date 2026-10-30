@@ -146,12 +146,73 @@ static void test_exhaustion_releases_insert_reference() {
     tree.release(reusable.leaf_node);
 }
 
+static void test_generated_tokens_extend_retained_cache() {
+    printf("\n[test_generated_tokens_extend_retained_cache]\n");
+    RecordingKvOps ops;
+    radixforge::RadixTree tree;
+    radixforge::KVMapper mapper(ops, tree, config_with_sequences(3));
+
+    const auto prompt = tok({1, 2, 3});
+    auto prepared = mapper.prepare_sequence(prompt);
+    mapper.mark_sequence_ready(prepared.seq_id, prepared.leaf_node);
+    const auto with_generated = tok({1, 2, 3, 4, 5});
+    radixforge::RadixNode* extended =
+        mapper.extend_sequence(prepared.seq_id, prepared.leaf_node, with_generated);
+    mapper.release_sequence(prepared.seq_id, extended);
+    tree.release(prepared.leaf_node);
+
+    const auto follow_up = tok({1, 2, 3, 4, 5, 6, 7});
+    auto next = mapper.prepare_sequence(follow_up);
+    CHECK(next.cached_pos == 5,
+          "follow-up copies the full prompt plus decoded generated tokens");
+    CHECK(next.delta.size() == 2 && next.delta[0] == 6,
+          "follow-up decodes only tokens beyond the retained generated prefix");
+    CHECK(!ops.calls.empty() && ops.calls.back().type == Call::Type::Copy &&
+              ops.calls.back().p1 == 5,
+          "follow-up KV copy uses the full generated-token cache coverage");
+
+    mapper.release_sequence(next.seq_id, next.leaf_node);
+    tree.release(next.leaf_node);
+}
+
+static void test_high_watermark_evicts_idle_retained_sequences() {
+    printf("\n[test_high_watermark_evicts_idle_retained_sequences]\n");
+    RecordingKvOps ops;
+    radixforge::Config config = config_with_sequences(4);
+    config.n_ctx = 10;
+    config.kv_high_watermark = 0.5f;
+    radixforge::RadixTree tree;
+    radixforge::KVMapper mapper(ops, tree, config);
+
+    auto first = mapper.prepare_sequence(tok({1, 2, 3}));
+    mapper.mark_sequence_ready(first.seq_id, first.leaf_node);
+    mapper.release_sequence(first.seq_id, first.leaf_node);
+    tree.release(first.leaf_node);
+    auto second = mapper.prepare_sequence(tok({4, 5, 6}));
+    mapper.mark_sequence_ready(second.seq_id, second.leaf_node);
+    mapper.release_sequence(second.seq_id, second.leaf_node);
+    tree.release(second.leaf_node);
+    CHECK(mapper.kv_cells_used() == 6, "two retained prefixes consume six KV cells");
+
+    auto third = mapper.prepare_sequence(tok({7}));
+    CHECK(mapper.metrics().evictions.load() == 1,
+          "preparation evicts the LRU idle retained sequence above watermark");
+    CHECK(mapper.kv_cells_used() <= 3,
+          "eviction reduces tracked KV usage below the high watermark");
+    CHECK(ops.remove_count(first.seq_id, 0, -1) == 1,
+          "watermark eviction clears the oldest retained sequence");
+    mapper.release_sequence(third.seq_id, third.leaf_node);
+    tree.release(third.leaf_node);
+}
+
 int main() {
     printf("=== KVMapper Unit Tests ===\n");
     test_retained_sequence_is_trimmed();
     test_full_cache_hit_decodes_final_prompt_token();
     test_double_release_does_not_duplicate_free_id();
     test_exhaustion_releases_insert_reference();
+    test_generated_tokens_extend_retained_cache();
+    test_high_watermark_evicts_idle_retained_sequences();
 
     printf("\nResults: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
