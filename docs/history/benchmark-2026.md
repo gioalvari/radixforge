@@ -1,3 +1,7 @@
+# Historical benchmark report (2026-06-25 snapshot)
+
+> **Archived context only.** These measurements and implementation notes predate the cache-hardening work now on the main development line, including ancestor coverage caps, non-empty full-hit deltas, canonical-length trimming, leaf pruning, and the current error/timeout behavior. They must not be used to characterize current performance or correctness. See the [README](../../README.md) for current behavior.
+
 # RadixForge — Performance Benchmark Report
 
 **Date:** 2026-06-25 (v3: parallel prefill + shared_mutex + canonical-trim + httplib + timeout)
