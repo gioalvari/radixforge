@@ -180,7 +180,7 @@ Successful decoded output extends the reusable radix prefix. In a deterministic 
 - The project is tested on macOS with the llama.cpp Metal path; other platforms/backends are not validated here.
 - It serves one model per process and has one inference worker. Run separate processes for separate models.
 - The API is intentionally small: it does not implement authentication for `/v1/*`, tools/function calling, embeddings, logprobs, grammar controls, or the complete OpenAI API surface.
-- Output quality, memory use, and throughput depend on the selected GGUF model and llama.cpp version. No current benchmark is presented as a general performance claim.
+- Output quality, memory use, and throughput depend on the selected GGUF model and llama.cpp version. A current, single-machine shared-prefix measurement is documented in [docs/benchmark.md](docs/benchmark.md); it is not a general performance claim.
 - KV high-watermark accounting is maintained by `KVMapper` from valid cells assigned to each sequence; it is not a direct llama.cpp memory-occupancy measurement. Active or referenced sequences cannot be evicted to satisfy the watermark.
 - The parser is deliberately minimal and intended only for the supported request schema.
 
