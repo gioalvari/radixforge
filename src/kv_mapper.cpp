@@ -14,8 +14,7 @@ KVMapper::KVMapper(KvOps& kv_ops, RadixTree& tree, const Config& config)
     }
 }
 
-KVMapper::PrepareResult KVMapper::prepare_sequence(
-    const std::vector<llama_token>& prompt_tokens) {
+KVMapper::PrepareResult KVMapper::prepare_sequence(const std::vector<llama_token>& prompt_tokens) {
 
     metrics_.total_requests.fetch_add(1, std::memory_order_relaxed);
     metrics_.prompt_tokens.fetch_add(prompt_tokens.size(), std::memory_order_relaxed);
@@ -40,15 +39,14 @@ KVMapper::PrepareResult KVMapper::prepare_sequence(
         // cannot have been evicted by allocate_seq_id().
         int32_t source_len = 0;
         llama_seq_id src_seq = match.matched_tokens > 0
-            ? tree_.find_covering_seq_id(match.cache_node, &source_len)
-            : -1;
+                                   ? tree_.find_covering_seq_id(match.cache_node, &source_len)
+                                   : -1;
         cached_pos = src_seq != -1 ? std::min(match.matched_tokens, source_len) : 0;
 
         // A non-empty full hit still decodes its final prompt token to obtain
         // logits. Copy only the preceding KV cells so that token is decoded at
         // its original position instead of being duplicated at position n.
-        if (!prompt_tokens.empty() &&
-            cached_pos == static_cast<int32_t>(prompt_tokens.size())) {
+        if (!prompt_tokens.empty() && cached_pos == static_cast<int32_t>(prompt_tokens.size())) {
             --cached_pos;
         }
 
@@ -70,8 +68,7 @@ KVMapper::PrepareResult KVMapper::prepare_sequence(
             metrics_.misses.fetch_add(1, std::memory_order_relaxed);
         }
 
-        tree_.register_seq_id(match.node, new_seq,
-                               static_cast<int32_t>(prompt_tokens.size()));
+        tree_.register_seq_id(match.node, new_seq, static_cast<int32_t>(prompt_tokens.size()));
         seq_cell_counts_[new_seq] = cached_pos;
         retained_seq_ids_.erase(new_seq);
     } catch (...) {
@@ -96,7 +93,8 @@ KVMapper::PrepareResult KVMapper::prepare_sequence(
 void KVMapper::mark_sequence_ready(llama_seq_id seq_id, RadixNode* node) {
     std::lock_guard<std::mutex> lock(mutex_);
     tree_.mark_seq_id_ready(node, seq_id);
-    if (node) seq_cell_counts_[seq_id] = node->canonical_len;
+    if (node)
+        seq_cell_counts_[seq_id] = node->canonical_len;
 }
 
 void KVMapper::set_sequence_cell_count(llama_seq_id seq_id, int32_t cell_count) {
@@ -109,16 +107,15 @@ void KVMapper::set_sequence_cell_count(llama_seq_id seq_id, int32_t cell_count) 
 RadixNode* KVMapper::extend_sequence(llama_seq_id seq_id, RadixNode* node,
                                      const std::vector<llama_token>& tokens) {
     std::lock_guard<std::mutex> lock(mutex_);
-    RadixNode* extended = tree_.extend_seq_id(node, seq_id, tokens,
-                                              static_cast<int32_t>(tokens.size()));
+    RadixNode* extended =
+        tree_.extend_seq_id(node, seq_id, tokens, static_cast<int32_t>(tokens.size()));
     if (seq_cell_counts_.count(seq_id) != 0) {
         seq_cell_counts_[seq_id] = static_cast<int32_t>(tokens.size());
     }
     return extended;
 }
 
-PrefixAvailability KVMapper::inspect_prefix(
-    const std::vector<llama_token>& prompt_tokens) const {
+PrefixAvailability KVMapper::inspect_prefix(const std::vector<llama_token>& prompt_tokens) const {
     std::lock_guard<std::mutex> lock(mutex_);
     return tree_.inspect_prefix(prompt_tokens);
 }
@@ -144,7 +141,8 @@ void KVMapper::release_sequence(llama_seq_id seq_id, RadixNode* node) {
 
 void KVMapper::gc_if_needed() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!free_seq_ids_.empty()) return;
+    if (!free_seq_ids_.empty())
+        return;
     RF_INFO("kv_mapper", "GC triggered: evicting LRU sequences");
     evict_one_locked();
 }
@@ -184,8 +182,8 @@ llama_seq_id KVMapper::allocate_seq_id_locked() {
     // Warn when pool is near saturation (below gc_watermark remaining)
     int32_t remaining = static_cast<int32_t>(free_seq_ids_.size());
     if (remaining <= (config_.max_sequences - config_.gc_watermark)) {
-        RF_WARN("kv_mapper", "Seq pool near saturation: %d/%d free slots remaining",
-                remaining, config_.max_sequences);
+        RF_WARN("kv_mapper", "Seq pool near saturation: %d/%d free slots remaining", remaining,
+                config_.max_sequences);
     }
     llama_seq_id id = free_seq_ids_.front();
     free_seq_ids_.pop_front();
@@ -201,7 +199,8 @@ bool KVMapper::evict_one_locked() {
         }
 
         std::vector<llama_seq_id> evicted = tree_.evict(candidates[0]);
-        if (evicted.empty()) continue;
+        if (evicted.empty())
+            continue;
 
         for (llama_seq_id sid : evicted) {
             kv_ops_.seq_rm(sid, 0, -1);
@@ -216,11 +215,12 @@ bool KVMapper::evict_one_locked() {
 }
 
 bool KVMapper::evict_kv_pressure_locked() {
-    const int64_t high_watermark = static_cast<int64_t>(
-        static_cast<double>(config_.n_ctx) * config_.kv_high_watermark);
+    const int64_t high_watermark =
+        static_cast<int64_t>(static_cast<double>(config_.n_ctx) * config_.kv_high_watermark);
     bool evicted = false;
     while (kv_cells_used_locked() > high_watermark) {
-        if (!evict_one_locked()) break;
+        if (!evict_one_locked())
+            break;
         evicted = true;
     }
     return evicted;
@@ -228,7 +228,8 @@ bool KVMapper::evict_kv_pressure_locked() {
 
 int64_t KVMapper::kv_cells_used_locked() const {
     int64_t total = 0;
-    for (const auto& [seq_id, cells] : seq_cell_counts_) total += cells;
+    for (const auto& [seq_id, cells] : seq_cell_counts_)
+        total += cells;
     return total;
 }
 

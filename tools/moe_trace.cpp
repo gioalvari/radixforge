@@ -42,7 +42,7 @@ struct Options {
     std::string model_path;
     std::string data_path;
     std::string out_prefix;
-    std::size_t limit = 0;  // 0 = all
+    std::size_t limit = 0; // 0 = all
     int gpu_layers = 99;
     int ctx_size = 8192;
     int max_tokens_override = -1;
@@ -67,7 +67,7 @@ struct Capture {
     int n_expert = 0;
     int k = 0;
     int n_tokens = 0;
-    std::map<int, std::vector<uint8_t>> by_layer;  // layer -> [n_tokens][k]
+    std::map<int, std::vector<uint8_t>> by_layer; // layer -> [n_tokens][k]
 };
 
 bool on_tensor(ggml_tensor* t, bool ask, void* user_data) {
@@ -107,19 +107,29 @@ std::string json_escape(const std::string& s) {
     std::ostringstream out;
     for (const unsigned char c : s) {
         switch (c) {
-            case '"': out << "\\\""; break;
-            case '\\': out << "\\\\"; break;
-            case '\n': out << "\\n"; break;
-            case '\r': out << "\\r"; break;
-            case '\t': out << "\\t"; break;
-            default:
-                if (c < 0x20) {
-                    char buf[8];
-                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-                    out << buf;
-                } else {
-                    out << c;
-                }
+        case '"':
+            out << "\\\"";
+            break;
+        case '\\':
+            out << "\\\\";
+            break;
+        case '\n':
+            out << "\\n";
+            break;
+        case '\r':
+            out << "\\r";
+            break;
+        case '\t':
+            out << "\\t";
+            break;
+        default:
+            if (c < 0x20) {
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                out << buf;
+            } else {
+                out << c;
+            }
         }
     }
     return out.str();
@@ -172,8 +182,8 @@ std::string render(const llama_model* model, const Request& r) {
         chat.push_back({m.role.c_str(), m.content.c_str()});
     }
     std::vector<char> buf(16384);
-    int32_t n = llama_chat_apply_template(tmpl, chat.data(), chat.size(), true,
-                                          buf.data(), static_cast<int32_t>(buf.size()));
+    int32_t n = llama_chat_apply_template(tmpl, chat.data(), chat.size(), true, buf.data(),
+                                          static_cast<int32_t>(buf.size()));
     if (n > static_cast<int32_t>(buf.size())) {
         buf.resize(static_cast<std::size_t>(n));
         n = llama_chat_apply_template(tmpl, chat.data(), chat.size(), true, buf.data(), n);
@@ -185,11 +195,11 @@ std::string render(const llama_model* model, const Request& r) {
 }
 
 std::vector<llama_token> tokenize(const llama_vocab* vocab, const std::string& text) {
-    int32_t n = -llama_tokenize(vocab, text.c_str(), static_cast<int32_t>(text.size()),
-                                nullptr, 0, true, true);
+    int32_t n = -llama_tokenize(vocab, text.c_str(), static_cast<int32_t>(text.size()), nullptr, 0,
+                                true, true);
     std::vector<llama_token> tokens(static_cast<std::size_t>(n));
-    if (llama_tokenize(vocab, text.c_str(), static_cast<int32_t>(text.size()), tokens.data(),
-                       n, true, true) < 0) {
+    if (llama_tokenize(vocab, text.c_str(), static_cast<int32_t>(text.size()), tokens.data(), n,
+                       true, true) < 0) {
         fail("tokenize failed");
     }
     return tokens;
@@ -211,14 +221,22 @@ Options parse_args(int argc, char** argv) {
             }
             return argv[++i];
         };
-        if (a == "-m" || a == "--model") opt.model_path = next();
-        else if (a == "--data") opt.data_path = next();
-        else if (a == "--out") opt.out_prefix = next();
-        else if (a == "--limit") opt.limit = std::stoul(next());
-        else if (a == "-ngl") opt.gpu_layers = std::stoi(next());
-        else if (a == "-c" || a == "--ctx-size") opt.ctx_size = std::stoi(next());
-        else if (a == "--max-tokens") opt.max_tokens_override = std::stoi(next());
-        else fail("unknown argument: " + a);
+        if (a == "-m" || a == "--model")
+            opt.model_path = next();
+        else if (a == "--data")
+            opt.data_path = next();
+        else if (a == "--out")
+            opt.out_prefix = next();
+        else if (a == "--limit")
+            opt.limit = std::stoul(next());
+        else if (a == "-ngl")
+            opt.gpu_layers = std::stoi(next());
+        else if (a == "-c" || a == "--ctx-size")
+            opt.ctx_size = std::stoi(next());
+        else if (a == "--max-tokens")
+            opt.max_tokens_override = std::stoi(next());
+        else
+            fail("unknown argument: " + a);
     }
     if (opt.model_path.empty() || opt.data_path.empty() || opt.out_prefix.empty()) {
         fail("usage: moe_trace -m MODEL --data WORKLOAD.jsonl --out PREFIX "
@@ -227,7 +245,7 @@ Options parse_args(int argc, char** argv) {
     return opt;
 }
 
-}  // namespace
+} // namespace
 
 int main(int argc, char** argv) {
     try {
@@ -277,8 +295,7 @@ int main(int argc, char** argv) {
         uint64_t offset = 0;
 
         // Decode `tokens` starting at `pos`, append routing to `trace`.
-        auto decode = [&](const llama_token* tokens, int n, int pos,
-                          std::vector<uint8_t>& trace) {
+        auto decode = [&](const llama_token* tokens, int n, int pos, std::vector<uint8_t>& trace) {
             llama_batch batch = llama_batch_init(n, 0, 1);
             for (int i = 0; i < n; ++i) {
                 batch.token[i] = tokens[i];
@@ -298,7 +315,8 @@ int main(int argc, char** argv) {
                 fail("routing capture mismatch (ubatch split?)");
             }
             if (moe_layers.empty()) {
-                for (const auto& [layer, _] : cap.by_layer) moe_layers.push_back(layer);
+                for (const auto& [layer, _] : cap.by_layer)
+                    moe_layers.push_back(layer);
             } else if (cap.by_layer.size() != moe_layers.size()) {
                 fail("MoE layer count changed between decodes");
             }
@@ -342,7 +360,7 @@ int main(int argc, char** argv) {
                 generated.push_back(tok);
                 text += piece(vocab, tok);
                 if (static_cast<int>(generated.size()) == r.max_tokens) {
-                    break;  // last token is emitted but never routed
+                    break; // last token is emitted but never routed
                 }
                 decode(&tok, 1, pos, trace);
                 ++pos;
@@ -358,13 +376,13 @@ int main(int argc, char** argv) {
                  << "\",\"agent\":\"" << json_escape(r.agent) << "\",\"turn\":" << r.turn
                  << ",\"n_prompt\":" << prompt.size() << ",\"n_gen\":" << generated.size()
                  << ",\"n_routed\":" << n_routed << ",\"offset\":" << offset
-                 << ",\"prefill_ms\":"
-                 << std::chrono::duration<double, std::milli>(t1 - t0).count()
-                 << ",\"decode_ms\":"
-                 << std::chrono::duration<double, std::milli>(t2 - t1).count()
+                 << ",\"prefill_ms\":" << std::chrono::duration<double, std::milli>(t1 - t0).count()
+                 << ",\"decode_ms\":" << std::chrono::duration<double, std::milli>(t2 - t1).count()
                  << ",\"tokens\":[";
-            for (std::size_t i = 0; i < prompt.size(); ++i) rows << (i ? "," : "") << prompt[i];
-            for (const llama_token tok : generated) rows << "," << tok;
+            for (std::size_t i = 0; i < prompt.size(); ++i)
+                rows << (i ? "," : "") << prompt[i];
+            for (const llama_token tok : generated)
+                rows << "," << tok;
             rows << "],\"text\":\"" << json_escape(text) << "\"}\n";
             rows.flush();
             offset += trace.size();
@@ -379,7 +397,8 @@ int main(int argc, char** argv) {
         meta << "{\"model\":\"" << json_escape(opt.model_path) << "\",\"desc\":\""
              << json_escape(desc) << "\",\"n_expert\":" << cap.n_expert << ",\"k\":" << cap.k
              << ",\"moe_layers\":[";
-        for (std::size_t i = 0; i < moe_layers.size(); ++i) meta << (i ? "," : "") << moe_layers[i];
+        for (std::size_t i = 0; i < moe_layers.size(); ++i)
+            meta << (i ? "," : "") << moe_layers[i];
         meta << "],\"dtype\":\"uint8\",\"layout\":\"[n_routed][n_moe_layers][k]\"}\n";
 
         llama_sampler_free(sampler);

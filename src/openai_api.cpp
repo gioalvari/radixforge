@@ -20,8 +20,7 @@ std::string timings_json(const InferenceStats& stats) {
 std::string usage_json(const InferenceStats& stats) {
     return "{\"prompt_tokens\":" + std::to_string(stats.prompt_tokens) +
            ",\"completion_tokens\":" + std::to_string(stats.predicted_n) +
-           ",\"total_tokens\":" +
-           std::to_string(stats.prompt_tokens + stats.predicted_n) + "}";
+           ",\"total_tokens\":" + std::to_string(stats.prompt_tokens + stats.predicted_n) + "}";
 }
 
 std::string json_escape(const std::string& value) {
@@ -29,27 +28,36 @@ std::string json_escape(const std::string& value) {
     escaped.reserve(value.size() + 16);
     for (unsigned char c : value) {
         switch (c) {
-            case '"': escaped += "\\\""; break;
-            case '\\': escaped += "\\\\"; break;
-            case '\n': escaped += "\\n"; break;
-            case '\r': escaped += "\\r"; break;
-            case '\t': escaped += "\\t"; break;
-            default:
-                if (c < 0x20) {
-                    char buffer[8];
-                    std::snprintf(buffer, sizeof(buffer), "\\u%04x", c);
-                    escaped += buffer;
-                } else {
-                    escaped += static_cast<char>(c);
-                }
+        case '"':
+            escaped += "\\\"";
+            break;
+        case '\\':
+            escaped += "\\\\";
+            break;
+        case '\n':
+            escaped += "\\n";
+            break;
+        case '\r':
+            escaped += "\\r";
+            break;
+        case '\t':
+            escaped += "\\t";
+            break;
+        default:
+            if (c < 0x20) {
+                char buffer[8];
+                std::snprintf(buffer, sizeof(buffer), "\\u%04x", c);
+                escaped += buffer;
+            } else {
+                escaped += static_cast<char>(c);
+            }
         }
     }
     return escaped;
 }
 
 std::string error_json(const std::string& message, const std::string& type) {
-    return "{\"error\":{\"message\":\"" + json_escape(message) +
-           "\",\"type\":\"" + type + "\"}}";
+    return "{\"error\":{\"message\":\"" + json_escape(message) + "\",\"type\":\"" + type + "\"}}";
 }
 
 void parse_request_body(const std::string& body_text, InferenceRequest& request,
@@ -61,7 +69,8 @@ void parse_request_body(const std::string& body_text, InferenceRequest& request,
             const auto& message = body["messages"][i];
             ChatMessage chat_message;
             chat_message.role = message.contains("role") ? message["role"].as_string() : "user";
-            chat_message.content = message.contains("content") ? message["content"].as_string() : "";
+            chat_message.content =
+                message.contains("content") ? message["content"].as_string() : "";
             request.messages.push_back(std::move(chat_message));
         }
     } else if (body.contains("prompt") && body["prompt"].type() == json::Type::String) {
@@ -83,10 +92,10 @@ void parse_request_body(const std::string& body_text, InferenceRequest& request,
         request.max_tokens = config.max_tokens;
     }
 
-    request.temperature = body.contains("temperature") &&
-                                  body["temperature"].type() == json::Type::Number
-                              ? static_cast<float>(body["temperature"].as_number())
-                              : config.temperature;
+    request.temperature =
+        body.contains("temperature") && body["temperature"].type() == json::Type::Number
+            ? static_cast<float>(body["temperature"].as_number())
+            : config.temperature;
     request.top_p = body.contains("top_p") && body["top_p"].type() == json::Type::Number
                         ? static_cast<float>(body["top_p"].as_number())
                         : config.top_p;
@@ -94,31 +103,34 @@ void parse_request_body(const std::string& body_text, InferenceRequest& request,
                      body["stream"].as_bool();
 }
 
-std::string completion_json(const std::string& content, const InferenceStats& stats,
-    bool is_chat) {
+std::string completion_json(const std::string& content, const InferenceStats& stats, bool is_chat) {
     if (is_chat) {
         return "{\"object\":\"chat.completion\",\"choices\":[{\"message\":{"
-               "\"role\":\"assistant\",\"content\":\"" + json_escape(content) +
+               "\"role\":\"assistant\",\"content\":\"" +
+               json_escape(content) +
                "\"},\"finish_reason\":\"stop\"}],\"timings\":" + timings_json(stats) +
                ",\"usage\":" + usage_json(stats) + "}";
     }
-    return "{\"object\":\"text_completion\",\"choices\":[{\"text\":\"" +
-           json_escape(content) + "\",\"finish_reason\":\"stop\"}],\"timings\":" +
-           timings_json(stats) + ",\"usage\":" + usage_json(stats) + "}";
+    return "{\"object\":\"text_completion\",\"choices\":[{\"text\":\"" + json_escape(content) +
+           "\",\"finish_reason\":\"stop\"}],\"timings\":" + timings_json(stats) +
+           ",\"usage\":" + usage_json(stats) + "}";
 }
 
 size_t complete_utf8_prefix_length(const std::string& text) {
-    if (text.empty()) return 0;
+    if (text.empty())
+        return 0;
     size_t start = text.size();
     while (start > 0 && (static_cast<unsigned char>(text[start - 1]) & 0xC0) == 0x80) {
         --start;
     }
-    if (start == text.size()) return text.size();
+    if (start == text.size())
+        return text.size();
 
     const unsigned char lead = static_cast<unsigned char>(text[start]);
-    const size_t expected = lead >= 0xF0 && lead <= 0xF4 ? 4 :
-                            lead >= 0xE0 && lead <= 0xEF ? 3 :
-                            lead >= 0xC2 && lead <= 0xDF ? 2 : 1;
+    const size_t expected = lead >= 0xF0 && lead <= 0xF4   ? 4
+                            : lead >= 0xE0 && lead <= 0xEF ? 3
+                            : lead >= 0xC2 && lead <= 0xDF ? 2
+                                                           : 1;
     return text.size() - start < expected ? start : text.size();
 }
 

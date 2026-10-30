@@ -14,11 +14,13 @@
 static radixforge::Server* g_server = nullptr;
 
 static void signal_handler(int) {
-    if (g_server) g_server->stop();
+    if (g_server)
+        g_server->stop();
 }
 
 static void print_usage(const char* prog) {
-    fprintf(stderr,
+    fprintf(
+        stderr,
         "Usage: %s -m <model.gguf> [options]\n"
         "Options:\n"
         "  -m, --model <path>         Path to GGUF model (required)\n"
@@ -33,7 +35,8 @@ static void print_usage(const char* prog) {
         "  --kv-high-watermark <0..1> Evict idle KV above this context fraction (default: 0.9)\n"
         "  --admin-token <token>      Bearer token for /admin/* endpoints (default: none)\n"
         "  --log-level <level>        Log level: debug|info|warn|error (default: info)\n"
-        "\n", prog);
+        "\n",
+        prog);
 }
 
 int main(int argc, char** argv) {
@@ -86,14 +89,18 @@ int main(int argc, char** argv) {
     signal(SIGTERM, signal_handler);
 
     // Apply log level from config
-    if      (config.log_level == "debug") radixforge::set_log_level(radixforge::LogLevel::DEBUG);
-    else if (config.log_level == "warn")  radixforge::set_log_level(radixforge::LogLevel::WARN);
-    else if (config.log_level == "error") radixforge::set_log_level(radixforge::LogLevel::ERROR);
-    else                                   radixforge::set_log_level(radixforge::LogLevel::INFO);
+    if (config.log_level == "debug")
+        radixforge::set_log_level(radixforge::LogLevel::DEBUG);
+    else if (config.log_level == "warn")
+        radixforge::set_log_level(radixforge::LogLevel::WARN);
+    else if (config.log_level == "error")
+        radixforge::set_log_level(radixforge::LogLevel::ERROR);
+    else
+        radixforge::set_log_level(radixforge::LogLevel::INFO);
 
     RF_INFO("main", "Loading model: %s", config.model_path.c_str());
-    RF_INFO("main", "Context: %d tokens, GPU layers: %d, Max sequences: %d",
-            config.n_ctx, config.n_gpu_layers, config.max_sequences);
+    RF_INFO("main", "Context: %d tokens, GPU layers: %d, Max sequences: %d", config.n_ctx,
+            config.n_gpu_layers, config.max_sequences);
 
     // Phase 1: Initialize llama.cpp bridge
     radixforge::LlamaBridge bridge(config);
@@ -112,7 +119,7 @@ int main(int argc, char** argv) {
     radixforge::Server server(config, worker, mapper, tree);
     g_server = &server;
 
-    server.start();  // blocks until shutdown
+    server.start(); // blocks until shutdown
 
     worker.stop();
     RF_INFO("main", "Shutdown complete.");

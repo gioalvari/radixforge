@@ -9,15 +9,15 @@
 static int g_pass = 0;
 static int g_fail = 0;
 
-#define CHECK(cond, msg) \
-    do { \
-        if (cond) { \
-            ++g_pass; \
-            printf("  PASS  %s\n", msg); \
-        } else { \
-            ++g_fail; \
-            printf("  FAIL  %s  (line %d)\n", msg, __LINE__); \
-        } \
+#define CHECK(cond, msg)                                                                           \
+    do {                                                                                           \
+        if (cond) {                                                                                \
+            ++g_pass;                                                                              \
+            printf("  PASS  %s\n", msg);                                                           \
+        } else {                                                                                   \
+            ++g_fail;                                                                              \
+            printf("  FAIL  %s  (line %d)\n", msg, __LINE__);                                      \
+        }                                                                                          \
     } while (0)
 
 struct Call {
@@ -29,7 +29,7 @@ struct Call {
 };
 
 class RecordingKvOps final : public radixforge::KvOps {
-public:
+  public:
     void seq_cp(llama_seq_id src, llama_seq_id dst, int32_t p0, int32_t p1) override {
         calls.push_back({Call::Type::Copy, src, dst, p0, p1});
     }
@@ -41,8 +41,8 @@ public:
     int remove_count(llama_seq_id seq_id, int32_t p0, int32_t p1) const {
         int count = 0;
         for (const auto& call : calls) {
-            if (call.type == Call::Type::Remove && call.src == seq_id &&
-                call.p0 == p0 && call.p1 == p1) {
+            if (call.type == Call::Type::Remove && call.src == seq_id && call.p0 == p0 &&
+                call.p1 == p1) {
                 ++count;
             }
         }
@@ -163,8 +163,7 @@ static void test_generated_tokens_extend_retained_cache() {
 
     const auto follow_up = tok({1, 2, 3, 4, 5, 6, 7});
     auto next = mapper.prepare_sequence(follow_up);
-    CHECK(next.cached_pos == 5,
-          "follow-up copies the full prompt plus decoded generated tokens");
+    CHECK(next.cached_pos == 5, "follow-up copies the full prompt plus decoded generated tokens");
     CHECK(next.delta.size() == 2 && next.delta[0] == 6,
           "follow-up decodes only tokens beyond the retained generated prefix");
     CHECK(!ops.calls.empty() && ops.calls.back().type == Call::Type::Copy &&

@@ -17,16 +17,16 @@
 namespace radixforge {
 
 class SequenceCapacityExhausted : public std::runtime_error {
-public:
+  public:
     using std::runtime_error::runtime_error;
 };
 
 // Snapshot of cache performance counters. All fields are atomics so they
 // can be read from the HTTP thread while the worker updates them.
 struct CacheMetrics {
-    std::atomic<uint64_t> hits{0};          // requests where KV cache was copied
-    std::atomic<uint64_t> misses{0};        // requests where full prefill was needed
-    std::atomic<uint64_t> evictions{0};     // physical seq_ids freed by LRU eviction
+    std::atomic<uint64_t> hits{0};      // requests where KV cache was copied
+    std::atomic<uint64_t> misses{0};    // requests where full prefill was needed
+    std::atomic<uint64_t> evictions{0}; // physical seq_ids freed by LRU eviction
     std::atomic<uint64_t> total_requests{0};
     std::atomic<uint64_t> cache_hit_tokens{0};
     std::atomic<uint64_t> prompt_tokens{0};
@@ -39,29 +39,27 @@ struct CacheMetrics {
 // Minimal KV-cache operations used by KVMapper. Tests can supply a recording
 // implementation without constructing a model context.
 class KvOps {
-public:
+  public:
     virtual ~KvOps() = default;
-    virtual void seq_cp(llama_seq_id src, llama_seq_id dst, int32_t p0,
-                        int32_t p1) = 0;
+    virtual void seq_cp(llama_seq_id src, llama_seq_id dst, int32_t p0, int32_t p1) = 0;
     virtual void seq_rm(llama_seq_id seq_id, int32_t p0, int32_t p1) = 0;
 };
 
 class LlamaKvOps final : public KvOps {
-public:
+  public:
     explicit LlamaKvOps(LlamaBridge& bridge) : bridge_(bridge) {}
 
-    void seq_cp(llama_seq_id src, llama_seq_id dst, int32_t p0,
-                int32_t p1) override;
+    void seq_cp(llama_seq_id src, llama_seq_id dst, int32_t p0, int32_t p1) override;
     void seq_rm(llama_seq_id seq_id, int32_t p0, int32_t p1) override;
 
-private:
+  private:
     LlamaBridge& bridge_;
 };
 
 // Manages the mapping between logical Radix Tree nodes and physical
 // llama_seq_id slots in the KV cache.
 class KVMapper {
-public:
+  public:
     KVMapper(LlamaBridge& bridge, RadixTree& tree, const Config& config);
     KVMapper(KvOps& kv_ops, RadixTree& tree, const Config& config);
 
@@ -72,7 +70,7 @@ public:
     // 4. Return the remaining tokens that need decoding
     struct PrepareResult {
         llama_seq_id seq_id;
-        int32_t cached_pos;              // position up to which cache is valid
+        int32_t cached_pos; // position up to which cache is valid
         // Tokens still needing decode. delta is non-empty for non-empty prompts.
         std::vector<llama_token> delta;
         RadixNode* leaf_node;
@@ -117,9 +115,11 @@ public:
     int32_t retained_sequence_count() const;
 
     // Read-only access to cache performance counters.
-    const CacheMetrics& metrics() const { return metrics_; }
+    const CacheMetrics& metrics() const {
+        return metrics_;
+    }
 
-private:
+  private:
     std::unique_ptr<KvOps> owned_kv_ops_;
     KvOps& kv_ops_;
     RadixTree& tree_;

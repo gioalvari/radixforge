@@ -25,19 +25,23 @@ struct RadixNode {
     // released, so only its prompt-prefix cache remains.
     int32_t canonical_len = 0;
 
-    bool has_physical_cache() const { return !ready_seq_ids.empty(); }
-    llama_seq_id any_seq_id() const { return *ready_seq_ids.begin(); }
+    bool has_physical_cache() const {
+        return !ready_seq_ids.empty();
+    }
+    llama_seq_id any_seq_id() const {
+        return *ready_seq_ids.begin();
+    }
 
     std::unordered_map<llama_token, std::unique_ptr<RadixNode>> children;
     RadixNode* parent = nullptr;
 };
 
 struct PrefixMatch {
-    RadixNode* node;              // leaf node for this request (new or existing)
-    RadixNode* cache_node;        // node holding physical KV cache for matched_tokens
-    llama_seq_id cache_seq_id = -1; // seq_id to copy from (set during partial-match split)
-    int32_t matched_tokens;       // total tokens matched along the path
-    std::vector<llama_token> remaining;  // tokens not yet in cache
+    RadixNode* node;                    // leaf node for this request (new or existing)
+    RadixNode* cache_node;              // node holding physical KV cache for matched_tokens
+    llama_seq_id cache_seq_id = -1;     // seq_id to copy from (set during partial-match split)
+    int32_t matched_tokens;             // total tokens matched along the path
+    std::vector<llama_token> remaining; // tokens not yet in cache
 };
 
 // Non-mutating prefix/cache inspection used to avoid copying from a sequence
@@ -49,7 +53,7 @@ struct PrefixAvailability {
 };
 
 class RadixTree {
-public:
+  public:
     RadixTree();
 
     // Insert a full prompt token sequence. Returns the prefix match info
@@ -77,16 +81,14 @@ public:
     // release_seq_id when the caller should free the sequence. A sole ready
     // sequence is retained as the canonical cache entry; pending sequences
     // are always removed and freed.
-    void register_seq_id(RadixNode* node, llama_seq_id seq_id,
-                           int32_t canonical_len);
+    void register_seq_id(RadixNode* node, llama_seq_id seq_id, int32_t canonical_len);
     void mark_seq_id_ready(RadixNode* node, llama_seq_id seq_id);
     bool release_seq_id(RadixNode* node, llama_seq_id seq_id);
 
     // Move a ready sequence to the node representing its complete valid KV
     // token prefix. The caller retains its reference to the original node.
     RadixNode* extend_seq_id(RadixNode* node, llama_seq_id seq_id,
-                             const std::vector<llama_token>& tokens,
-                             int32_t canonical_len);
+                             const std::vector<llama_token>& tokens, int32_t canonical_len);
 
     // Find a physical sequence covering node's prefix under the tree lock.
     // Evicted ids are removed before this method can return them.
@@ -101,20 +103,22 @@ public:
     // Serialize the tree structure to a JSON string for diagnostics.
     std::string to_json() const;
 
-    RadixNode* root() { return root_.get(); }
+    RadixNode* root() {
+        return root_.get();
+    }
 
-private:
+  private:
     std::unique_ptr<RadixNode> root_;
     uint64_t tick_ = 0;
-    mutable std::shared_mutex mutex_;  // shared for reads, exclusive for writes
+    mutable std::shared_mutex mutex_; // shared for reads, exclusive for writes
 
     PrefixMatch find_prefix_locked(const std::vector<llama_token>& tokens);
     PrefixAvailability inspect_prefix_locked(const std::vector<llama_token>& tokens) const;
     void split_node(RadixNode* node, size_t split_pos);
     void prune_empty_leaves_locked(RadixNode* node);
     static int32_t cumulative_token_depth(const RadixNode* node);
-    llama_seq_id find_covering_seq_id_locked(
-        const RadixNode* node, int32_t* out_canonical_len) const;
+    llama_seq_id find_covering_seq_id_locked(const RadixNode* node,
+                                             int32_t* out_canonical_len) const;
     static void consider_availability(const RadixNode* node, int32_t covered,
                                       PrefixAvailability* availability);
 };

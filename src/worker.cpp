@@ -9,12 +9,13 @@ namespace radixforge {
 
 // --- InferenceWorker ---
 
-InferenceWorker::InferenceWorker(LlamaBridge& bridge, RadixTree& tree,
-                                 KVMapper& mapper, const Config& config)
-    : bridge_(bridge), tree_(tree), mapper_(mapper),
-      admit_window_ms_(config.admit_window_ms) {}
+InferenceWorker::InferenceWorker(LlamaBridge& bridge, RadixTree& tree, KVMapper& mapper,
+                                 const Config& config)
+    : bridge_(bridge), tree_(tree), mapper_(mapper), admit_window_ms_(config.admit_window_ms) {}
 
-InferenceWorker::~InferenceWorker() { stop(); }
+InferenceWorker::~InferenceWorker() {
+    stop();
+}
 
 void InferenceWorker::start() {
     running_.store(true);
@@ -24,7 +25,8 @@ void InferenceWorker::start() {
 void InferenceWorker::stop() {
     running_.store(false);
     queue_cv_.notify_all();
-    if (worker_thread_.joinable()) worker_thread_.join();
+    if (worker_thread_.joinable())
+        worker_thread_.join();
 }
 
 void InferenceWorker::enqueue(InferenceRequest req) {
@@ -55,20 +57,21 @@ bool InferenceWorker::is_cancelled(const InferenceRequest& req) {
 
 // ── Phase 1: tokenise + KV-prepare every request ─────────────────────────────
 // No llama_decode yet — just builds PrefillCtx for each request.
-std::vector<PrefillCtx> InferenceWorker::prepare_all(
-    std::vector<InferenceRequest>& reqs, std::vector<InferenceRequest>* deferred,
-    std::vector<InferenceRequest>* queued) {
+std::vector<PrefillCtx> InferenceWorker::prepare_all(std::vector<InferenceRequest>& reqs,
+                                                     std::vector<InferenceRequest>* deferred,
+                                                     std::vector<InferenceRequest>* queued) {
 
     std::vector<PrefillCtx> ctxs;
     ctxs.reserve(reqs.size());
 
     for (size_t req_index = 0; req_index < reqs.size(); ++req_index) {
         auto& req = reqs[req_index];
-        if (is_cancelled(req)) continue;
+        if (is_cancelled(req))
+            continue;
         // Resolve chat template
         std::string prompt = req.prompt;
         if (prompt.empty() && !req.messages.empty()) {
-            std::vector<std::pair<std::string,std::string>> chat_msgs;
+            std::vector<std::pair<std::string, std::string>> chat_msgs;
             chat_msgs.reserve(req.messages.size());
             for (const auto& m : req.messages)
                 chat_msgs.push_back({m.role, m.content});
@@ -80,25 +83,26 @@ std::vector<PrefillCtx> InferenceWorker::prepare_all(
         // Guard: clamp max_tokens so the total never exceeds the context window.
         int32_t available = bridge_.n_ctx() - (int32_t)tokens.size() - 4;
         if (available <= 0) {
-            RF_WARN("worker", "Prompt too long (%zu tokens) for ctx %d — rejected",
-                     tokens.size(), bridge_.n_ctx());
-            if (req.on_error) req.on_error("prompt exceeds context window", 400);
+            RF_WARN("worker", "Prompt too long (%zu tokens) for ctx %d — rejected", tokens.size(),
+                    bridge_.n_ctx());
+            if (req.on_error)
+                req.on_error("prompt exceeds context window", 400);
             continue;
         }
         if (req.max_tokens > available) {
-            RF_DEBUG("worker", "max_tokens clamped %d -> %d (ctx limit)",
-                     req.max_tokens, available);
+            RF_DEBUG("worker", "max_tokens clamped %d -> %d (ctx limit)", req.max_tokens,
+                     available);
             req.max_tokens = available;
         }
 
         const PrefixAvailability availability = mapper_.inspect_prefix(tokens);
-        const int32_t pending_advantage =
-            availability.pending_tokens - availability.ready_tokens;
+        const int32_t pending_advantage = availability.pending_tokens - availability.ready_tokens;
         if (pending_advantage > 0) {
             // Do not insert/allocate this request yet: the leading pending
             // request will become ready (or be released on failure) this run.
             // This prevents a copy from empty KV while retaining prefix sharing.
-            if (deferred) deferred->push_back(std::move(req));
+            if (deferred)
+                deferred->push_back(std::move(req));
             continue;
         }
 
@@ -107,7 +111,7 @@ std::vector<PrefillCtx> InferenceWorker::prepare_all(
         ctx.tokens = std::move(tokens);
 
         try {
-            ctx.prep  = mapper_.prepare_sequence(ctx.tokens);
+            ctx.prep = mapper_.prepare_sequence(ctx.tokens);
         } catch (const SequenceCapacityExhausted&) {
             if (queued) {
                 queued->push_back(std::move(ctx.req));
@@ -120,7 +124,8 @@ std::vector<PrefillCtx> InferenceWorker::prepare_all(
             break;
         } catch (const std::exception& e) {
             RF_ERROR("worker", "prepare_sequence failed: %s", e.what());
-            if (ctx.req.on_error) ctx.req.on_error("resource exhausted", 503);
+            if (ctx.req.on_error)
+                ctx.req.on_error("resource exhausted", 503);
             continue;
         }
 
@@ -138,8 +143,8 @@ std::vector<PrefillCtx> InferenceWorker::prepare_all(
         ctx.stats.cache_n = ctx.prep.cached_pos;
         ctx.stats.prompt_tokens = static_cast<int32_t>(ctx.tokens.size());
 
-        RF_DEBUG("worker", "Prefill: %zu tokens, cached: %d, delta: %zu",
-                 ctx.tokens.size(), ctx.prep.cached_pos, ctx.prep.delta.size());
+        RF_DEBUG("worker", "Prefill: %zu tokens, cached: %d, delta: %zu", ctx.tokens.size(),
+                 ctx.prep.cached_pos, ctx.prep.delta.size());
 
         ctxs.push_back(std::move(ctx));
     }
@@ -147,7 +152,8 @@ std::vector<PrefillCtx> InferenceWorker::prepare_all(
 }
 
 void InferenceWorker::defer_to_front(std::vector<InferenceRequest>& deferred) {
-    if (deferred.empty()) return;
+    if (deferred.empty())
+        return;
     std::lock_guard<std::mutex> lock(queue_mutex_);
     for (auto it = deferred.rbegin(); it != deferred.rend(); ++it) {
         queue_.push_front(std::move(*it));
@@ -159,13 +165,12 @@ void InferenceWorker::defer_to_front(std::vector<InferenceRequest>& deferred) {
 void InferenceWorker::retire(ActiveSeq& seq, bool notify_client) {
     RadixNode* sequence_node = seq.leaf_node;
     if (notify_client && !is_cancelled(seq.req)) {
-        sequence_node = mapper_.extend_sequence(seq.seq_id, seq.leaf_node,
-                                                seq.cached_tokens);
+        sequence_node = mapper_.extend_sequence(seq.seq_id, seq.leaf_node, seq.cached_tokens);
     }
     if (notify_client && seq.req.on_token && !is_cancelled(seq.req)) {
         const auto finished = std::chrono::steady_clock::now();
-        seq.stats.predicted_ms = std::chrono::duration<double, std::milli>(
-            finished - seq.generation_started_at).count();
+        seq.stats.predicted_ms =
+            std::chrono::duration<double, std::milli>(finished - seq.generation_started_at).count();
         seq.req.on_token("", true, &seq.stats);
     }
     LlamaBridge::free_sampler(seq.sampler);
@@ -173,14 +178,15 @@ void InferenceWorker::retire(ActiveSeq& seq, bool notify_client) {
     tree_.release(seq.leaf_node);
 }
 
-void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
-                                 std::vector<PrefillCtx>& prefilling,
+void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs, std::vector<PrefillCtx>& prefilling,
                                  size_t newly_admitted) {
     for (auto& seq : seqs) {
-        if (is_cancelled(seq.req)) seq.done = true;
+        if (is_cancelled(seq.req))
+            seq.done = true;
     }
     auto cancelled = std::remove_if(seqs.begin(), seqs.end(), [this](ActiveSeq& seq) {
-        if (!seq.done) return false;
+        if (!seq.done)
+            return false;
         RF_INFO("worker", "Retiring cancelled sequence %d", seq.seq_id);
         retire(seq, false);
         return true;
@@ -188,7 +194,8 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
     seqs.erase(cancelled, seqs.end());
 
     auto abandoned = std::remove_if(prefilling.begin(), prefilling.end(), [this](PrefillCtx& ctx) {
-        if (!is_cancelled(ctx.req)) return false;
+        if (!is_cancelled(ctx.req))
+            return false;
         mapper_.release_sequence(ctx.prep.seq_id, ctx.prep.leaf_node);
         tree_.release(ctx.prep.leaf_node);
         return true;
@@ -197,7 +204,8 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
 
     const int decoding = static_cast<int>(seqs.size());
     const int32_t capacity = bridge_.n_batch() - decoding;
-    if (decoding == 0 && (prefilling.empty() || capacity <= 0)) return;
+    if (decoding == 0 && (prefilling.empty() || capacity <= 0))
+        return;
 
     llama_batch batch = llama_batch_init(bridge_.n_batch(), 0, 1);
     int batch_idx = 0;
@@ -221,7 +229,8 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
         auto& ctx = prefilling[i];
         const int32_t total = static_cast<int32_t>(ctx.prep.delta.size());
         const int32_t remaining = total - ctx.delta_start;
-        if (remaining <= 0) continue;
+        if (remaining <= 0)
+            continue;
         const int32_t take = std::min(remaining, capacity - prompt_tokens);
         const bool completes = take == remaining;
         const int32_t start = ctx.delta_start;
@@ -244,8 +253,8 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
     }
 
     if (newly_admitted > 0) {
-        RF_INFO("worker", "step: admitted %zu, prefill %d tokens, decoding %d",
-                newly_admitted, prompt_tokens, decoding);
+        RF_INFO("worker", "step: admitted %zu, prefill %d tokens, decoding %d", newly_admitted,
+                prompt_tokens, decoding);
     }
 
     int decode_status = llama_decode(bridge_.ctx(), batch);
@@ -284,7 +293,8 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
     if (decode_status != 0) {
         RF_ERROR("worker", "Fused batch decode failed (%d seqs, %d prompt tokens, status %d)",
                  decoding, prompt_tokens, decode_status);
-        for (auto& seq : seqs) fail_active(seq, "inference decode failed", 500);
+        for (auto& seq : seqs)
+            fail_active(seq, "inference decode failed", 500);
         seqs.clear();
         for (auto& ctx : prefilling) {
             fail_prefill(ctx, "inference prefill failed", 500);
@@ -324,15 +334,17 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
             continue;
         }
         char buf[512];
-        const int32_t nc = llama_token_to_piece(bridge_.vocab(), new_tok, buf, sizeof(buf), 0, true);
+        const int32_t nc =
+            llama_token_to_piece(bridge_.vocab(), new_tok, buf, sizeof(buf), 0, true);
         std::string piece(buf, nc > 0 ? nc : 0);
         ++seq.stats.predicted_n;
         --seq.remaining;
         const bool last = seq.remaining == 0;
         if (seq.req.on_token && !is_cancelled(seq.req)) {
             if (last) {
-                seq.stats.predicted_ms = std::chrono::duration<double, std::milli>(
-                    now - seq.generation_started_at).count();
+                seq.stats.predicted_ms =
+                    std::chrono::duration<double, std::milli>(now - seq.generation_started_at)
+                        .count();
             }
             seq.req.on_token(piece, last, last ? &seq.stats : nullptr);
         }
@@ -344,7 +356,8 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
         }
     }
     auto completed = std::remove_if(seqs.begin(), seqs.end(), [this](ActiveSeq& seq) {
-        if (!seq.done) return false;
+        if (!seq.done)
+            return false;
         if (is_cancelled(seq.req)) {
             RF_INFO("worker", "Retiring cancelled sequence %d", seq.seq_id);
         }
@@ -357,7 +370,8 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
     std::vector<size_t> completed_prefills;
     for (size_t index = 0; index < prefilling.size(); ++index) {
         const int32_t logit_index = prompt_logits[index];
-        if (logit_index < 0) continue;
+        if (logit_index < 0)
+            continue;
         auto& ctx = prefilling[index];
         if (is_cancelled(ctx.req)) {
             mapper_.release_sequence(ctx.prep.seq_id, ctx.prep.leaf_node);
@@ -367,10 +381,11 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
         }
         llama_sampler* sampler = bridge_.create_sampler(ctx.req.temperature, ctx.req.top_p);
         const llama_token first_tok = llama_sampler_sample(sampler, bridge_.ctx(), logit_index);
-        ctx.stats.prompt_ms = std::chrono::duration<double, std::milli>(
-            now - ctx.req.admitted_at).count();
+        ctx.stats.prompt_ms =
+            std::chrono::duration<double, std::milli>(now - ctx.req.admitted_at).count();
         if (llama_vocab_is_eog(bridge_.vocab(), first_tok)) {
-            if (ctx.req.on_token) ctx.req.on_token("", true, &ctx.stats);
+            if (ctx.req.on_token)
+                ctx.req.on_token("", true, &ctx.stats);
             LlamaBridge::free_sampler(sampler);
             mapper_.release_sequence(ctx.prep.seq_id, ctx.prep.leaf_node);
             tree_.release(ctx.prep.leaf_node);
@@ -378,12 +393,13 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
             continue;
         }
         char buf[512];
-        const int32_t nc = llama_token_to_piece(bridge_.vocab(), first_tok, buf,
-                                                 sizeof(buf), 0, true);
+        const int32_t nc =
+            llama_token_to_piece(bridge_.vocab(), first_tok, buf, sizeof(buf), 0, true);
         std::string piece(buf, nc > 0 ? nc : 0);
         ctx.stats.predicted_n = 1;
         const bool first_is_last = ctx.req.max_tokens <= 1;
-        if (first_is_last) ctx.stats.predicted_ms = 0.0;
+        if (first_is_last)
+            ctx.stats.predicted_ms = 0.0;
         if (ctx.req.on_token) {
             ctx.req.on_token(piece, first_is_last, first_is_last ? &ctx.stats : nullptr);
         }
@@ -394,8 +410,7 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
             completed_prefills.push_back(index);
             continue;
         }
-        const int32_t end_pos = ctx.prep.cached_pos +
-                                static_cast<int32_t>(ctx.prep.delta.size());
+        const int32_t end_pos = ctx.prep.cached_pos + static_cast<int32_t>(ctx.prep.delta.size());
         ActiveSeq seq;
         seq.seq_id = ctx.prep.seq_id;
         seq.leaf_node = ctx.prep.leaf_node;
@@ -430,14 +445,15 @@ void InferenceWorker::run() {
                 if (idle && queue_.empty()) {
                     queue_cv_.wait(lock, [this] { return !queue_.empty() || !running_.load(); });
                 }
-                if (!running_.load() && queue_.empty()) break;
+                if (!running_.load() && queue_.empty())
+                    break;
                 if (idle && !queue_.empty() && admit_window_ms_ > 0) {
                     const auto deadline = std::chrono::steady_clock::now() +
-                        std::chrono::milliseconds(admit_window_ms_);
+                                          std::chrono::milliseconds(admit_window_ms_);
                     queue_cv_.wait_until(lock, deadline);
                 }
                 while (!queue_.empty() && static_cast<int32_t>(active.size() + prefilling.size() +
-                                             admitted.size()) < max_generating) {
+                                                               admitted.size()) < max_generating) {
                     admitted.push_back(std::move(queue_.front()));
                     queue_.pop_front();
                 }
@@ -454,7 +470,7 @@ void InferenceWorker::run() {
                 prefilling.insert(prefilling.end(), std::make_move_iterator(ctxs.begin()),
                                   std::make_move_iterator(ctxs.end()));
                 retry.insert(retry.end(), std::make_move_iterator(queued.begin()),
-                              std::make_move_iterator(queued.end()));
+                             std::make_move_iterator(queued.end()));
                 retry.insert(retry.end(), std::make_move_iterator(deferred.begin()),
                              std::make_move_iterator(deferred.end()));
             }
@@ -471,13 +487,13 @@ void InferenceWorker::run() {
             RF_WARN("worker", "Worker loop unknown exception (non-fatal)");
         }
     }
-    for (auto& seq : active) retire(seq, false);
+    for (auto& seq : active)
+        retire(seq, false);
     for (auto& ctx : prefilling) {
         mapper_.release_sequence(ctx.prep.seq_id, ctx.prep.leaf_node);
         tree_.release(ctx.prep.leaf_node);
     }
     generating_sequences_.store(0, std::memory_order_relaxed);
 }
-
 
 } // namespace radixforge

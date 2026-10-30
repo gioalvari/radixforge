@@ -22,7 +22,7 @@ using LlamaModelPtr = std::unique_ptr<llama_model, LlamaModelDeleter>;
 using LlamaContextPtr = std::unique_ptr<llama_context, LlamaContextDeleter>;
 
 class LlamaBridge {
-public:
+  public:
     explicit LlamaBridge(const Config& config);
     ~LlamaBridge();
 
@@ -33,15 +33,21 @@ public:
     LlamaBridge& operator=(LlamaBridge&&) = delete;
 
     // Accessors
-    llama_model* model() const { return model_.get(); }
-    llama_context* ctx() const { return ctx_.get(); }
-    const llama_vocab* vocab() const { return vocab_; }
+    llama_model* model() const {
+        return model_.get();
+    }
+    llama_context* ctx() const {
+        return ctx_.get();
+    }
+    const llama_vocab* vocab() const {
+        return vocab_;
+    }
 
     // Apply the model's native chat template (Jinja/ChatML embedded in GGUF).
     // Falls back to ChatML if the model has no embedded template.
     // Messages: vector of (role, content) pairs.
-    std::string apply_chat_template(
-        const std::vector<std::pair<std::string, std::string>>& messages) const;
+    std::string
+    apply_chat_template(const std::vector<std::pair<std::string, std::string>>& messages) const;
 
     // Tokenize a string into token IDs
     std::vector<llama_token> tokenize(const std::string& text, bool add_bos = true) const;
@@ -57,9 +63,9 @@ public:
 
     int32_t n_ctx() const;
     int32_t n_batch() const;
-    std::string model_name() const;  // human-readable model name from GGUF metadata
+    std::string model_name() const; // human-readable model name from GGUF metadata
 
-private:
+  private:
     Config config_;
     LlamaModelPtr model_;
     LlamaContextPtr ctx_;

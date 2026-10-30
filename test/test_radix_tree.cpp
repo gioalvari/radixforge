@@ -12,15 +12,15 @@
 static int g_pass = 0;
 static int g_fail = 0;
 
-#define CHECK(cond, msg) \
-    do { \
-        if (cond) { \
-            ++g_pass; \
-            printf("  PASS  %s\n", msg); \
-        } else { \
-            ++g_fail; \
-            printf("  FAIL  %s  (line %d)\n", msg, __LINE__); \
-        } \
+#define CHECK(cond, msg)                                                                           \
+    do {                                                                                           \
+        if (cond) {                                                                                \
+            ++g_pass;                                                                              \
+            printf("  PASS  %s\n", msg);                                                           \
+        } else {                                                                                   \
+            ++g_fail;                                                                              \
+            printf("  FAIL  %s  (line %d)\n", msg, __LINE__);                                      \
+        }                                                                                          \
     } while (0)
 
 // ─── helpers ────────────────────────────────────────────────────────────────
@@ -35,10 +35,10 @@ static void test_empty_insert() {
     printf("\n[test_empty_insert]\n");
     radixforge::RadixTree tree;
     auto m = tree.insert(tok({1, 2, 3, 4, 5}));
-    CHECK(m.matched_tokens == 0,     "empty tree: no prefix matched");
-    CHECK(m.remaining.size() == 5,   "empty tree: all 5 tokens in remaining");
-    CHECK(m.remaining[0] == 1,       "remaining[0] == 1");
-    CHECK(m.remaining[4] == 5,       "remaining[4] == 5");
+    CHECK(m.matched_tokens == 0, "empty tree: no prefix matched");
+    CHECK(m.remaining.size() == 5, "empty tree: all 5 tokens in remaining");
+    CHECK(m.remaining[0] == 1, "remaining[0] == 1");
+    CHECK(m.remaining[4] == 5, "remaining[4] == 5");
 }
 
 static void test_exact_repeat() {
@@ -46,8 +46,8 @@ static void test_exact_repeat() {
     radixforge::RadixTree tree;
     tree.insert(tok({10, 20, 30}));
     auto m = tree.insert(tok({10, 20, 30}));
-    CHECK(m.matched_tokens == 3,     "exact repeat: full match (3 tokens)");
-    CHECK(m.remaining.empty(),       "exact repeat: no remaining tokens");
+    CHECK(m.matched_tokens == 3, "exact repeat: full match (3 tokens)");
+    CHECK(m.remaining.empty(), "exact repeat: no remaining tokens");
 }
 
 static void test_partial_match() {
@@ -55,10 +55,10 @@ static void test_partial_match() {
     radixforge::RadixTree tree;
     tree.insert(tok({1, 2, 3, 4, 5}));
     auto m = tree.insert(tok({1, 2, 3, 6, 7}));
-    CHECK(m.matched_tokens == 3,     "partial match: 3 shared tokens");
-    CHECK(m.remaining.size() == 2,   "partial match: 2 remaining tokens");
-    CHECK(m.remaining[0] == 6,       "remaining[0] == 6");
-    CHECK(m.remaining[1] == 7,       "remaining[1] == 7");
+    CHECK(m.matched_tokens == 3, "partial match: 3 shared tokens");
+    CHECK(m.remaining.size() == 2, "partial match: 2 remaining tokens");
+    CHECK(m.remaining[0] == 6, "remaining[0] == 6");
+    CHECK(m.remaining[1] == 7, "remaining[1] == 7");
 }
 
 static void test_split_creates_shared_prefix() {
@@ -68,13 +68,13 @@ static void test_split_creates_shared_prefix() {
     tree.insert(tok({1, 2, 3, 4}));
     // Insert [1,2,5,6] — diverges after token 2; tree must split at pos 2
     auto m = tree.insert(tok({1, 2, 5, 6}));
-    CHECK(m.matched_tokens == 2,     "split: 2 tokens in shared prefix");
-    CHECK(m.remaining.size() == 2,   "split: 2 diverging tokens remaining");
-    CHECK(m.remaining[0] == 5,       "remaining[0] == 5 (diverge point)");
+    CHECK(m.matched_tokens == 2, "split: 2 tokens in shared prefix");
+    CHECK(m.remaining.size() == 2, "split: 2 diverging tokens remaining");
+    CHECK(m.remaining[0] == 5, "remaining[0] == 5 (diverge point)");
 
     // A third insert with the same prefix should also get matched_tokens >= 2
     auto m2 = tree.insert(tok({1, 2, 9, 9}));
-    CHECK(m2.matched_tokens >= 2,    "third insert also matches prefix node");
+    CHECK(m2.matched_tokens >= 2, "third insert also matches prefix node");
 }
 
 static void test_full_match_after_split() {
@@ -84,8 +84,8 @@ static void test_full_match_after_split() {
     tree.insert(tok({1, 2, 4}));
     // Re-inserting the first sequence should still give a full match
     auto m = tree.insert(tok({1, 2, 3}));
-    CHECK(m.matched_tokens == 3,     "full match after split: matched_tokens == 3");
-    CHECK(m.remaining.empty(),       "full match after split: no remaining");
+    CHECK(m.matched_tokens == 3, "full match after split: matched_tokens == 3");
+    CHECK(m.remaining.empty(), "full match after split: no remaining");
 }
 
 static void test_active_sequence_count() {
@@ -109,10 +109,10 @@ static void test_release_decrements_ref_count() {
     radixforge::RadixTree tree;
     auto m = tree.insert(tok({5, 6, 7}));
     int before = m.node->ref_count;
-    CHECK(before == 1,               "insert increments ref_count to 1");
+    CHECK(before == 1, "insert increments ref_count to 1");
     tree.release(m.node);
     auto next = tree.insert(tok({5, 6, 7}));
-    CHECK(next.matched_tokens == 0,  "release prunes an unowned leaf");
+    CHECK(next.matched_tokens == 0, "release prunes an unowned leaf");
     tree.release(next.node);
 }
 
@@ -134,14 +134,14 @@ static void test_eviction_candidates() {
     tree.release(m3.node);
 
     auto candidates = tree.find_eviction_candidates(2);
-    CHECK(candidates.size() == 2,    "find_eviction_candidates(2): returns exactly 2");
-    CHECK(candidates[0] != nullptr,  "candidate[0] is non-null");
-    CHECK(candidates[1] != nullptr,  "candidate[1] is non-null");
+    CHECK(candidates.size() == 2, "find_eviction_candidates(2): returns exactly 2");
+    CHECK(candidates[0] != nullptr, "candidate[0] is non-null");
+    CHECK(candidates[1] != nullptr, "candidate[1] is non-null");
     CHECK(candidates[0] != candidates[1], "candidate[0] != candidate[1]");
 
     // Request more than available
     auto all = tree.find_eviction_candidates(10);
-    CHECK(all.size() == 3,           "find_eviction_candidates(10): capped at 3 nodes");
+    CHECK(all.size() == 3, "find_eviction_candidates(10): capped at 3 nodes");
 }
 
 static void test_split_prefix_is_evictable() {
@@ -152,8 +152,7 @@ static void test_split_prefix_is_evictable() {
     original.node->seq_ids.insert(42);
     auto branch = tree.insert(tok({1, 2, 5, 6}));
 
-    CHECK(!original.node->children.empty(),
-          "split: original node became an internal prefix");
+    CHECK(!original.node->children.empty(), "split: original node became an internal prefix");
     CHECK(original.node->seq_ids.count(42) == 1,
           "split: physical seq_id remains on internal prefix");
 
@@ -163,10 +162,8 @@ static void test_split_prefix_is_evictable() {
           "release: internal prefix reference count returns to zero");
 
     auto candidates = tree.find_eviction_candidates(1);
-    CHECK(candidates.size() == 1,
-          "internal prefix with seq_id is an eviction candidate");
-    CHECK(candidates[0] == original.node,
-          "eviction candidate is the internal seq_id owner");
+    CHECK(candidates.size() == 1, "internal prefix with seq_id is an eviction candidate");
+    CHECK(candidates[0] == original.node, "eviction candidate is the internal seq_id owner");
 
     auto evicted = tree.evict(original.node);
     CHECK(evicted.size() == 1 && evicted[0] == 42,
@@ -249,8 +246,7 @@ static void test_ancestor_cache_coverage_stops_at_ancestor_depth() {
     int32_t canonical_len = 0;
     CHECK(tree.find_covering_seq_id(c.node, &canonical_len) == 11,
           "falls back to the shared-prefix ready sequence");
-    CHECK(canonical_len == 2,
-          "ancestor source coverage is capped at its cumulative token depth");
+    CHECK(canonical_len == 2, "ancestor source coverage is capped at its cumulative token depth");
     tree.release(c.node);
     tree.release(d.node);
 }
@@ -269,11 +265,9 @@ static void test_empty_leaves_are_pruned() {
     tree.register_seq_id(cached.node, 33, 3);
     tree.release(cached.node);
     auto evicted = tree.evict(cached.node);
-    CHECK(evicted.size() == 1 && evicted[0] == 33,
-          "idle leaf sequence is evicted");
+    CHECK(evicted.size() == 1 && evicted[0] == 33, "idle leaf sequence is evicted");
     auto after_evict = tree.insert(tok({7, 8, 9}));
-    CHECK(after_evict.matched_tokens == 0,
-          "evicting a sequence-only leaf prunes the empty leaf");
+    CHECK(after_evict.matched_tokens == 0, "evicting a sequence-only leaf prunes the empty leaf");
     tree.release(after_evict.node);
 }
 
@@ -295,7 +289,8 @@ static void test_concurrent_insert_release_stress() {
             }
         });
     }
-    for (auto& thread : threads) thread.join();
+    for (auto& thread : threads)
+        thread.join();
     CHECK(tree.active_sequence_count() == 0,
           "concurrent insert/release leaves no registered sequences");
 }
@@ -307,13 +302,13 @@ static void test_to_json() {
     tree.insert(tok({1, 2, 4}));
 
     std::string j = tree.to_json();
-    CHECK(!j.empty(),                        "to_json: non-empty");
-    CHECK(j.find("\"tick\"") != std::string::npos,   "to_json: contains 'tick'");
-    CHECK(j.find("\"root\"") != std::string::npos,   "to_json: contains 'root'");
+    CHECK(!j.empty(), "to_json: non-empty");
+    CHECK(j.find("\"tick\"") != std::string::npos, "to_json: contains 'tick'");
+    CHECK(j.find("\"root\"") != std::string::npos, "to_json: contains 'root'");
     CHECK(j.find("\"children\"") != std::string::npos, "to_json: contains 'children'");
     // Verify the JSON starts/ends like an object
-    CHECK(j.front() == '{',                  "to_json: starts with '{'");
-    CHECK(j.back() == '}',                   "to_json: ends with '}'");
+    CHECK(j.front() == '{', "to_json: starts with '{'");
+    CHECK(j.back() == '}', "to_json: ends with '}'");
 }
 
 // ─── main ────────────────────────────────────────────────────────────────────
