@@ -51,7 +51,8 @@ flowchart LR
 2. The worker tokenizes it, finds the longest matching radix prefix, and obtains a physical sequence ID.
 3. For a cached prefix, `KVMapper` uses `llama_memory_seq_cp` to attach the prefix's KV cells to the new sequence.
 4. The worker decodes the non-empty prompt delta, samples tokens, and streams or collects the response.
-5. On completion, the sequence is released. One ready sequence may be retained as a canonical prompt cache; transient sequences are freed. Idle retained entries are eligible for LRU eviction.
+5. After a successful generation, the ready sequence is extended in the radix tree with the prompt plus generated tokens that were actually decoded into KV. The final sampled token is excluded when it was never fed back through a decode step.
+6. On release, one ready sequence may be retained as a canonical cache; transient sequences are freed. Before preparation, the mapper evicts idle retained entries by LRU while its tracked KV-cell use exceeds `--kv-high-watermark × --ctx-size`.
 
 The worker performs continuous batching: a decode step can contain generation tokens from active requests and prompt tokens from newly admitted requests, up to `--batch-size`.
 
@@ -59,11 +60,11 @@ The worker performs continuous batching: a decode step can contain generation to
 
 The cache lifecycle deliberately favors correct reuse over maximal reuse:
 
-- **Ancestor-cap coverage:** a reusable source may cover only the canonical token length recorded for that tree node; a descendant's generated suffix is never treated as prompt KV for another request.
+- **Ancestor-cap coverage:** a reusable source may cover only the canonical token length recorded for that tree node; a descendant's suffix is never treated as KV for another request unless the successful generation explicitly extended the tree to that suffix.
 - **Non-empty delta:** for every non-empty prompt, preparation returns at least one token to decode. A complete prompt hit backs off one token rather than decoding into an already occupied KV position.
-- **Canonical trimming:** when the retained canonical sequence finishes generating, generated KV cells are removed beyond its `canonical_len` before it is reused.
+- **Canonical KV length:** `canonical_len` records tokens with valid KV, including generated tokens that were decoded and retained after a successful response. A final sampled-but-not-decoded token is not retained.
 - **Ready-only copying:** a sequence becomes a copy source only after its prefill decode succeeds. Pending entries are never used as cache sources.
-- **Safe eviction and pruning:** only unreferenced cache entries are evicted; empty leaf branches are pruned while logical internal prefixes remain available for future matching.
+- **Safe eviction and pruning:** only unreferenced cache entries are evicted, whether under sequence-ID pressure or the mapper's KV high-watermark; empty leaf branches are pruned while logical internal prefixes remain available for future matching.
 
 ## Build and test
 
@@ -96,6 +97,7 @@ The test suite includes radix-tree unit tests and `KVMapper` lifecycle tests usi
 | `--max-seq <n>` | `32` | Maximum llama.cpp sequence IDs. |
 | `--admit-window-ms <n>` | `2` | Idle coalescing window for request bursts; `0` disables the wait. |
 | `--request-timeout <seconds>` | `300` | Non-streaming response timeout; values are clamped to at least one second. |
+| `--kv-high-watermark <0..1>` | `0.9` | Before preparation, LRU-evict idle retained sequences while mapper-tracked KV cells exceed this fraction of `--ctx-size`. Values must be greater than `0` and at most `1`. |
 | `--admin-token <token>` | unset | Optional Bearer token required for `/admin/*`. |
 | `--log-level <level>` | `info` | `debug`, `info`, `warn`, or `error`. |
 
@@ -106,12 +108,32 @@ The server accepts JSON at these endpoints:
 | Endpoint | Behavior |
 | --- | --- |
 | `GET /health` | Returns server status, model basename, active/pending counts, and cache-hit rate. |
+| `GET /metrics` | Returns Prometheus text-format counters and gauges. |
 | `GET /admin/stats` | Returns worker and cache counters; requires `Authorization: Bearer <token>` when `--admin-token` is set. |
 | `GET /admin/tree/dump` | Returns radix-tree diagnostics; same optional admin authorization. |
 | `POST /v1/chat/completions` | Chat-shaped response with `choices[].message`. |
 | `POST /v1/completions` | Text-completion-shaped response with `object: "text_completion"` and `choices[].text`. |
 
 Request bodies accept either `messages` (an array of `{role, content}` objects) or a string `prompt`, plus optional `max_tokens`, `temperature`, `top_p`, and `stream`.
+
+### Prometheus metrics
+
+`GET /metrics` is unauthenticated and returns `text/plain; version=0.0.4`. It exposes request, prompt-token, cache-hit-token, and eviction counters, plus sequence, KV-cell, and tree-node gauges:
+
+```text
+# TYPE radixforge_requests_total counter
+radixforge_requests_total 42
+# TYPE radixforge_cache_hit_tokens_total counter
+radixforge_cache_hit_tokens_total 768
+# TYPE radixforge_kv_cells_used gauge
+radixforge_kv_cells_used 1024
+```
+
+The complete metric set is `radixforge_requests_total`, `radixforge_cache_hit_tokens_total`, `radixforge_prompt_tokens_total`, `radixforge_evictions_total`, `radixforge_active_sequences`, `radixforge_retained_sequences`, `radixforge_kv_cells_used`, and `radixforge_tree_nodes`. `radixforge_kv_cells_used` is mapper-tracked per-sequence valid-KV accounting, not a direct occupancy reading from llama.cpp.
+
+### Multi-turn reuse
+
+Successful decoded output extends the reusable radix prefix. In a deterministic smoke check with Qwen2.5-0.5B-Instruct Q4_K_M at temperature 0, the first-turn prompt had 16 tokens; the second-turn prompt had 35 tokens and reused 18 cache-hit tokens, including generated answer tokens. The second-turn output matched a cold run after restart. This is a single smoke observation, not a performance benchmark.
 
 ### Validation and errors
 
@@ -133,6 +155,7 @@ Request bodies accept either `messages` (an array of `{role, content}` objects) 
 - It serves one model per process and has one inference worker. Run separate processes for separate models.
 - The API is intentionally small: it does not implement authentication for `/v1/*`, tools/function calling, embeddings, logprobs, grammar controls, or the complete OpenAI API surface.
 - Output quality, memory use, and throughput depend on the selected GGUF model and llama.cpp version. No current benchmark is presented as a general performance claim.
+- KV high-watermark accounting is maintained by `KVMapper` from valid cells assigned to each sequence; it is not a direct llama.cpp memory-occupancy measurement. Active or referenced sequences cannot be evicted to satisfy the watermark.
 - The parser is deliberately minimal and intended only for the supported request schema.
 
 ## Research spikes
