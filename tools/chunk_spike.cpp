@@ -157,17 +157,17 @@ Options parse_options(int argc, char** argv) {
     return options;
 }
 
-std::vector<llama_token> tokenize(
-    const llama_vocab* vocab, const std::string& text, bool add_special) {
+std::vector<llama_token> tokenize(const llama_vocab* vocab, const std::string& text,
+                                  bool add_special) {
     std::vector<llama_token> tokens(text.size() + 32U);
-    int32_t count = llama_tokenize(vocab, text.c_str(),
-                                   static_cast<int32_t>(text.size()), tokens.data(),
-                                   static_cast<int32_t>(tokens.size()), add_special, true);
+    int32_t count =
+        llama_tokenize(vocab, text.c_str(), static_cast<int32_t>(text.size()), tokens.data(),
+                       static_cast<int32_t>(tokens.size()), add_special, true);
     if (count < 0) {
         tokens.resize(static_cast<std::size_t>(-count));
-        count = llama_tokenize(vocab, text.c_str(),
-                               static_cast<int32_t>(text.size()), tokens.data(),
-                               static_cast<int32_t>(tokens.size()), add_special, true);
+        count =
+            llama_tokenize(vocab, text.c_str(), static_cast<int32_t>(text.size()), tokens.data(),
+                           static_cast<int32_t>(tokens.size()), add_special, true);
     }
     if (count < 0) {
         fail("tokenization failed");
@@ -176,8 +176,8 @@ std::vector<llama_token> tokenize(
     return tokens;
 }
 
-bool decode(llama_context* context, const std::vector<llama_token>& tokens,
-            llama_seq_id sequence, int position) {
+bool decode(llama_context* context, const std::vector<llama_token>& tokens, llama_seq_id sequence,
+            int position) {
     if (tokens.empty()) {
         return true;
     }
@@ -194,8 +194,7 @@ bool decode(llama_context* context, const std::vector<llama_token>& tokens,
     llama_batch_free(batch);
     if (status != 0) {
         std::ostringstream message;
-        message << "llama_decode failed with status " << status << " at position "
-                << position;
+        message << "llama_decode failed with status " << status << " at position " << position;
         fail(message.str());
     }
     return true;
@@ -217,17 +216,15 @@ void remove_sequence(llama_memory_t memory, llama_seq_id sequence) {
 }
 
 Blob snapshot(llama_context* context, llama_seq_id sequence, int token_count) {
-    const size_t size = llama_state_seq_get_size_ext(
-        context, sequence, LLAMA_STATE_SEQ_FLAGS_NONE);
+    const size_t size = llama_state_seq_get_size_ext(context, sequence, LLAMA_STATE_SEQ_FLAGS_NONE);
     if (size == 0U) {
         fail("empty state blob");
     }
     Blob blob;
     blob.data.resize(size);
     blob.token_count = token_count;
-    const size_t written = llama_state_seq_get_data_ext(
-        context, blob.data.data(), blob.data.size(), sequence,
-        LLAMA_STATE_SEQ_FLAGS_NONE);
+    const size_t written = llama_state_seq_get_data_ext(context, blob.data.data(), blob.data.size(),
+                                                        sequence, LLAMA_STATE_SEQ_FLAGS_NONE);
     if (written != blob.data.size()) {
         fail("state snapshot size mismatch");
     }
@@ -236,9 +233,8 @@ Blob snapshot(llama_context* context, llama_seq_id sequence, int token_count) {
 
 void restore(llama_context* context, const Blob& blob, llama_seq_id sequence) {
     remove_sequence(llama_get_memory(context), sequence);
-    const size_t read = llama_state_seq_set_data_ext(
-        context, blob.data.data(), blob.data.size(), sequence,
-        LLAMA_STATE_SEQ_FLAGS_NONE);
+    const size_t read = llama_state_seq_set_data_ext(context, blob.data.data(), blob.data.size(),
+                                                     sequence, LLAMA_STATE_SEQ_FLAGS_NONE);
     if (read != blob.data.size()) {
         fail("state restore size mismatch");
     }
@@ -248,20 +244,34 @@ std::string json_escape(const std::string& value) {
     std::ostringstream escaped;
     for (const unsigned char character : value) {
         switch (character) {
-            case '"': escaped << "\\\""; break;
-            case '\\': escaped << "\\\\"; break;
-            case '\b': escaped << "\\b"; break;
-            case '\f': escaped << "\\f"; break;
-            case '\n': escaped << "\\n"; break;
-            case '\r': escaped << "\\r"; break;
-            case '\t': escaped << "\\t"; break;
-            default:
-                if (character < 0x20U) {
-                    escaped << "\\u" << std::hex << std::setw(4) << std::setfill('0')
-                            << static_cast<int>(character) << std::dec << std::setfill(' ');
-                } else {
-                    escaped << character;
-                }
+        case '"':
+            escaped << "\\\"";
+            break;
+        case '\\':
+            escaped << "\\\\";
+            break;
+        case '\b':
+            escaped << "\\b";
+            break;
+        case '\f':
+            escaped << "\\f";
+            break;
+        case '\n':
+            escaped << "\\n";
+            break;
+        case '\r':
+            escaped << "\\r";
+            break;
+        case '\t':
+            escaped << "\\t";
+            break;
+        default:
+            if (character < 0x20U) {
+                escaped << "\\u" << std::hex << std::setw(4) << std::setfill('0')
+                        << static_cast<int>(character) << std::dec << std::setfill(' ');
+            } else {
+                escaped << character;
+            }
         }
     }
     return escaped.str();
@@ -282,8 +292,7 @@ Item read_item(const std::string& line) {
     for (const auto& score : json["bm25"].as_array()) {
         item.bm25.push_back(score.as_number());
     }
-    if (item.id.empty() || item.chunks.size() != 10U ||
-        item.gold.size() != item.chunks.size() ||
+    if (item.id.empty() || item.chunks.size() != 10U || item.gold.size() != item.chunks.size() ||
         item.bm25.size() != item.chunks.size()) {
         fail("invalid input item (expected id and 10 chunks with gold and bm25 arrays)");
     }
@@ -357,12 +366,11 @@ double token_f1(const std::string& prediction, const std::string& gold) {
 }
 
 int argmax(const std::vector<float>& logits) {
-    return static_cast<int>(std::distance(
-        logits.begin(), std::max_element(logits.begin(), logits.end())));
+    return static_cast<int>(
+        std::distance(logits.begin(), std::max_element(logits.begin(), logits.end())));
 }
 
-double kl_divergence(const std::vector<float>& reference,
-                     const std::vector<float>& candidate) {
+double kl_divergence(const std::vector<float>& reference, const std::vector<float>& candidate) {
     const float ref_max = *std::max_element(reference.begin(), reference.end());
     const float candidate_max = *std::max_element(candidate.begin(), candidate.end());
     double ref_sum = 0.0;
@@ -387,14 +395,12 @@ std::string detokenize(const llama_vocab* vocab, const std::vector<llama_token>&
         return "";
     }
     std::vector<char> output(tokens.size() * 16U + 256U);
-    int32_t size = llama_detokenize(vocab, tokens.data(),
-                                    static_cast<int32_t>(tokens.size()), output.data(),
-                                    static_cast<int32_t>(output.size()), true, true);
+    int32_t size = llama_detokenize(vocab, tokens.data(), static_cast<int32_t>(tokens.size()),
+                                    output.data(), static_cast<int32_t>(output.size()), true, true);
     if (size < 0) {
         output.resize(static_cast<std::size_t>(-size));
-        size = llama_detokenize(vocab, tokens.data(),
-                                static_cast<int32_t>(tokens.size()), output.data(),
-                                static_cast<int32_t>(output.size()), true, true);
+        size = llama_detokenize(vocab, tokens.data(), static_cast<int32_t>(tokens.size()),
+                                output.data(), static_cast<int32_t>(output.size()), true, true);
     }
     if (size < 0) {
         fail("detokenization failed");
@@ -402,9 +408,8 @@ std::string detokenize(const llama_vocab* vocab, const std::vector<llama_token>&
     return {output.data(), static_cast<std::size_t>(size)};
 }
 
-std::string greedy_answer(llama_context* context, const llama_vocab* vocab,
-                          llama_seq_id sequence, int next_position,
-                          const std::vector<float>& initial_logits) {
+std::string greedy_answer(llama_context* context, const llama_vocab* vocab, llama_seq_id sequence,
+                          int next_position, const std::vector<float>& initial_logits) {
     std::vector<float> logits = initial_logits;
     std::vector<llama_token> generated;
     for (int step = 0; step < 32; ++step) {
@@ -422,10 +427,10 @@ std::string greedy_answer(llama_context* context, const llama_vocab* vocab,
 struct VariantSpec {
     bool full = false;
     bool prefixed = false;
-    int head = 0;          // tokens recomputed at the head of every non-first chunk
-    bool all = false;      // recompute every chunk token (sanity check)
-    int top_k = 0;         // recompute the top-k chunks by BM25 fully
-    bool gold = false;     // recompute the supporting (gold) chunks fully
+    int head = 0;      // tokens recomputed at the head of every non-first chunk
+    bool all = false;  // recompute every chunk token (sanity check)
+    int top_k = 0;     // recompute the top-k chunks by BM25 fully
+    bool gold = false; // recompute the supporting (gold) chunks fully
 };
 
 VariantSpec parse_variant(const std::string& variant) {
@@ -467,11 +472,9 @@ std::vector<bool> selected_chunks(const Item& item, const VariantSpec& spec) {
     if (spec.top_k > 0) {
         std::vector<std::size_t> order(item.chunks.size());
         std::iota(order.begin(), order.end(), 0U);
-        std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
-            return item.bm25[a] > item.bm25[b];
-        });
-        for (std::size_t k = 0; k < order.size() && k < static_cast<std::size_t>(spec.top_k);
-             ++k) {
+        std::stable_sort(order.begin(), order.end(),
+                         [&](std::size_t a, std::size_t b) { return item.bm25[a] > item.bm25[b]; });
+        for (std::size_t k = 0; k < order.size() && k < static_cast<std::size_t>(spec.top_k); ++k) {
             selected[order[k]] = true;
         }
     }
@@ -485,14 +488,12 @@ ItemCache precompute_chunks(llama_context* context, llama_memory_t memory,
     const auto start = std::chrono::steady_clock::now();
     for (const auto& chunk : chunks) {
         decode(context, chunk, kScratchSeq, 0);
-        cache.naive.push_back(snapshot(context, kScratchSeq,
-                                       static_cast<int>(chunk.size())));
+        cache.naive.push_back(snapshot(context, kScratchSeq, static_cast<int>(chunk.size())));
         remove_sequence(memory, kScratchSeq);
 
         llama_memory_seq_cp(memory, kPrefixSeq, kScratchSeq, -1, -1);
         decode(context, chunk, kScratchSeq, static_cast<int>(prefix.size()));
-        cache.prefixed.push_back(snapshot(context, kScratchSeq,
-                                          static_cast<int>(chunk.size())));
+        cache.prefixed.push_back(snapshot(context, kScratchSeq, static_cast<int>(chunk.size())));
         remove_sequence(memory, kScratchSeq);
     }
     llama_synchronize(context);
@@ -508,18 +509,15 @@ ItemCache precompute_chunks(llama_context* context, llama_memory_t memory,
 }
 
 void attach_tail(llama_context* context, llama_memory_t memory, const Blob& blob,
-                 bool blob_has_prefix, int prefix_tokens, int recomputed,
-                 int final_position) {
+                 bool blob_has_prefix, int prefix_tokens, int recomputed, int final_position) {
     restore(context, blob, kTemporarySeq);
     const int blob_start = blob_has_prefix ? prefix_tokens : 0;
     if (recomputed > 0) {
-        if (!llama_memory_seq_rm(memory, kTemporarySeq, blob_start,
-                                 blob_start + recomputed)) {
+        if (!llama_memory_seq_rm(memory, kTemporarySeq, blob_start, blob_start + recomputed)) {
             fail("could not remove recomputed cached head");
         }
     }
-    if (blob_has_prefix &&
-        !llama_memory_seq_rm(memory, kTemporarySeq, 0, prefix_tokens)) {
+    if (blob_has_prefix && !llama_memory_seq_rm(memory, kTemporarySeq, 0, prefix_tokens)) {
         fail("could not remove prefix from imported chunk blob");
     }
     const int tail_start = blob_start + recomputed;
@@ -531,9 +529,8 @@ void attach_tail(llama_context* context, llama_memory_t memory, const Blob& blob
     remove_sequence(memory, kTemporarySeq);
 }
 
-std::vector<float> probe_blob(llama_context* context, llama_memory_t memory,
-                              const Blob& blob, int next_position,
-                              llama_token probe_token, int vocabulary_size) {
+std::vector<float> probe_blob(llama_context* context, llama_memory_t memory, const Blob& blob,
+                              int next_position, llama_token probe_token, int vocabulary_size) {
     restore(context, blob, kTemporarySeq);
     decode(context, {probe_token}, kTemporarySeq, next_position);
     const std::vector<float> logits = current_logits(context, vocabulary_size);
@@ -633,8 +630,8 @@ Result run_variant(llama_context* context, llama_memory_t memory, const llama_vo
                                   position + static_cast<int>(suffix.size()), logits);
     result.em = normalize_answer(result.answer) == normalize_answer(item.answer) ? 1.0 : 0.0;
     result.f1 = token_f1(result.answer, item.answer);
-    result.agree_full = full_answer.empty() ||
-                         normalize_answer(result.answer) == normalize_answer(full_answer);
+    result.agree_full =
+        full_answer.empty() || normalize_answer(result.answer) == normalize_answer(full_answer);
     result.logits = logits;
     remove_sequence(memory, kTargetSeq);
     return result;
@@ -644,22 +641,19 @@ void write_result(std::ofstream& output, const Item& item, const Result& result,
                   const ItemCache& cache, int total_chunk_tokens, double independence) {
     const bool prefixed = result.variant.rfind("prefixed", 0) == 0U;
     const std::size_t blob_bytes = prefixed ? cache.prefixed_bytes : cache.naive_bytes;
-    output << std::setprecision(12) << "{\"id\":\"" << json_escape(item.id)
-           << "\",\"variant\":\"" << json_escape(result.variant)
-           << "\",\"kl\":" << result.kl << ",\"top1\":"
-           << (result.top1 ? "true" : "false") << ",\"em\":" << result.em
-           << ",\"f1\":" << result.f1 << ",\"agree_with_full\":"
-           << (result.agree_full ? "true" : "false") << ",\"ttft_ms\":"
-           << result.ttft_ms << ",\"tokens_computed\":" << result.tokens_computed
-           << ",\"decode_calls\":" << result.decode_calls
-           << ",\"attach_ms\":" << result.attach_ms
-           << ",\"recompute_ms\":" << result.recompute_ms
-           << ",\"suffix_ms\":" << result.suffix_ms
+    output << std::setprecision(12) << "{\"id\":\"" << json_escape(item.id) << "\",\"variant\":\""
+           << json_escape(result.variant) << "\",\"kl\":" << result.kl
+           << ",\"top1\":" << (result.top1 ? "true" : "false") << ",\"em\":" << result.em
+           << ",\"f1\":" << result.f1
+           << ",\"agree_with_full\":" << (result.agree_full ? "true" : "false")
+           << ",\"ttft_ms\":" << result.ttft_ms << ",\"tokens_computed\":" << result.tokens_computed
+           << ",\"decode_calls\":" << result.decode_calls << ",\"attach_ms\":" << result.attach_ms
+           << ",\"recompute_ms\":" << result.recompute_ms << ",\"suffix_ms\":" << result.suffix_ms
            << ",\"chunk_precompute_ms\":" << cache.precompute_ms
            << ",\"blob_bytes_per_chunk_token\":"
            << static_cast<double>(blob_bytes) / std::max(1, total_chunk_tokens)
-           << ",\"independence_max_abs\":" << independence
-           << ",\"answer\":\"" << json_escape(result.answer) << "\"}\n";
+           << ",\"independence_max_abs\":" << independence << ",\"answer\":\""
+           << json_escape(result.answer) << "\"}\n";
 }
 
 double mean(const std::vector<double>& values) {
@@ -669,8 +663,7 @@ double mean(const std::vector<double>& values) {
 double median(std::vector<double> values) {
     std::sort(values.begin(), values.end());
     const std::size_t middle = values.size() / 2U;
-    return values.size() % 2U == 0U ? (values[middle - 1U] + values[middle]) / 2.0
-                                    : values[middle];
+    return values.size() % 2U == 0U ? (values[middle - 1U] + values[middle]) / 2.0 : values[middle];
 }
 
 void print_aggregates(const std::vector<std::string>& variants,
@@ -680,21 +673,21 @@ void print_aggregates(const std::vector<std::string>& variants,
                  "| tokens computed | decode calls\n";
     for (const std::string& variant : variants) {
         const Aggregate& aggregate = aggregates.at(variant);
-        const double average_tokens = std::accumulate(
-            aggregate.tokens.begin(), aggregate.tokens.end(), 0.0) /
-                                      aggregate.tokens.size();
-        std::cout << variant << " | " << mean(aggregate.em) << " | " << mean(aggregate.f1)
-                  << " | " << mean(aggregate.agreement) << " | " << mean(aggregate.top1)
-                  << " | " << mean(aggregate.kl) << " | " << median(aggregate.ttft)
-                  << " | " << average_tokens << " | "
-                  << std::accumulate(aggregate.decode_calls.begin(),
-                                     aggregate.decode_calls.end(), 0.0) /
+        const double average_tokens =
+            std::accumulate(aggregate.tokens.begin(), aggregate.tokens.end(), 0.0) /
+            aggregate.tokens.size();
+        std::cout << variant << " | " << mean(aggregate.em) << " | " << mean(aggregate.f1) << " | "
+                  << mean(aggregate.agreement) << " | " << mean(aggregate.top1) << " | "
+                  << mean(aggregate.kl) << " | " << median(aggregate.ttft) << " | "
+                  << average_tokens << " | "
+                  << std::accumulate(aggregate.decode_calls.begin(), aggregate.decode_calls.end(),
+                                     0.0) /
                          std::max<std::size_t>(1U, aggregate.decode_calls.size())
                   << '\n';
     }
 }
 
-}  // namespace
+} // namespace
 
 int main(int argc, char** argv) {
     try {
@@ -744,13 +737,13 @@ int main(int argc, char** argv) {
             std::vector<std::vector<llama_token>> chunks;
             int total_chunk_tokens = 0;
             for (std::size_t chunk_index = 0; chunk_index < item.chunks.size(); ++chunk_index) {
-                const std::string text = "[" + std::to_string(chunk_index + 1U) + "] " +
-                                         item.chunks[chunk_index] + "\n";
+                const std::string text =
+                    "[" + std::to_string(chunk_index + 1U) + "] " + item.chunks[chunk_index] + "\n";
                 chunks.push_back(tokenize(vocab, text, false));
                 total_chunk_tokens += static_cast<int>(chunks.back().size());
             }
-            const std::string suffix_text = "Question: " + item.question +
-                                            "<|im_end|>\n<|im_start|>assistant\n";
+            const std::string suffix_text =
+                "Question: " + item.question + "<|im_end|>\n<|im_start|>assistant\n";
             const std::vector<llama_token> suffix = tokenize(vocab, suffix_text, false);
             const ItemCache cache = precompute_chunks(context, memory, prefix, chunks);
 
@@ -759,21 +752,20 @@ int main(int argc, char** argv) {
             // import, then restore and probe again.
             const llama_token probe = suffix.front();
             const int prefixed_end = static_cast<int>(prefix.size() + chunks.front().size());
-            const std::vector<float> before = probe_blob(
-                context, memory, cache.prefixed.front(), prefixed_end, probe,
-                llama_vocab_n_tokens(vocab));
+            const std::vector<float> before =
+                probe_blob(context, memory, cache.prefixed.front(), prefixed_end, probe,
+                           llama_vocab_n_tokens(vocab));
             llama_memory_seq_cp(memory, kPrefixSeq, kTargetSeq, -1, -1);
             attach_tail(context, memory, cache.prefixed.front(), true,
-                        static_cast<int>(prefix.size()), 0,
-                        static_cast<int>(prefix.size()) + 7);
+                        static_cast<int>(prefix.size()), 0, static_cast<int>(prefix.size()) + 7);
             remove_sequence(memory, kTargetSeq);
-            const std::vector<float> after = probe_blob(
-                context, memory, cache.prefixed.front(), prefixed_end, probe,
-                llama_vocab_n_tokens(vocab));
+            const std::vector<float> after =
+                probe_blob(context, memory, cache.prefixed.front(), prefixed_end, probe,
+                           llama_vocab_n_tokens(vocab));
             const double independence = max_abs_difference(before, after);
 
-            Result full = run_variant(context, memory, vocab, item, prefix, chunks, suffix,
-                                      cache, "full", {}, "");
+            Result full = run_variant(context, memory, vocab, item, prefix, chunks, suffix, cache,
+                                      "full", {}, "");
             // The shared prefix is excluded from TTFT, but full still reports all
             // request tokens as required by the comparison metric.
             full.tokens_computed += static_cast<int>(prefix.size());
@@ -783,10 +775,9 @@ int main(int argc, char** argv) {
                 if (variant == "full") {
                     continue;
                 }
-                Result result = run_variant(context, memory, vocab, item, prefix, chunks,
-                                            suffix, cache, variant,
-                                            results.at("full").logits,
-                                            results.at("full").answer);
+                Result result =
+                    run_variant(context, memory, vocab, item, prefix, chunks, suffix, cache,
+                                variant, results.at("full").logits, results.at("full").answer);
                 if (variant == "prefixed+rALL" && result.kl > kSanityKlLimit) {
                     std::ostringstream message;
                     message << "rALL sanity failed for " << item.id << ": KL=" << result.kl;

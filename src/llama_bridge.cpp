@@ -8,11 +8,13 @@
 namespace radixforge {
 
 void LlamaModelDeleter::operator()(llama_model* m) const {
-    if (m) llama_model_free(m);
+    if (m)
+        llama_model_free(m);
 }
 
 void LlamaContextDeleter::operator()(llama_context* c) const {
-    if (c) llama_free(c);
+    if (c)
+        llama_free(c);
 }
 
 LlamaBridge::LlamaBridge(const Config& config) : config_(config) {
@@ -29,9 +31,9 @@ LlamaBridge::LlamaBridge(const Config& config) : config_(config) {
     vocab_ = llama_model_get_vocab(model_.get());
 
     auto ctx_params = llama_context_default_params();
-    ctx_params.n_ctx     = config.n_ctx;
-    ctx_params.n_batch   = config.n_batch;
-    ctx_params.n_ubatch  = config.n_batch;  // must equal n_batch for encoder models
+    ctx_params.n_ctx = config.n_ctx;
+    ctx_params.n_batch = config.n_batch;
+    ctx_params.n_ubatch = config.n_batch; // must equal n_batch for encoder models
     ctx_params.n_seq_max = config.max_sequences;
     // One KV buffer shared by all sequences. Without this llama.cpp splits
     // n_ctx into n_seq_max streams (n_ctx / n_seq_max tokens each), rejects
@@ -44,100 +46,28 @@ LlamaBridge::LlamaBridge(const Config& config) : config_(config) {
     if (!ctx_) {
         throw std::runtime_error("Failed to create llama context");
     }
-
-    init_sampler(0.8f, 0.95f);
 }
 
 LlamaBridge::~LlamaBridge() {
-    if (sampler_) {
-        llama_sampler_free(sampler_);
-        sampler_ = nullptr;
-    }
     ctx_.reset();
     model_.reset();
     llama_backend_free();
 }
 
-void LlamaBridge::init_sampler(float temperature, float top_p) {
-    sampler_ = llama_sampler_chain_init(llama_sampler_chain_default_params());
-    llama_sampler_chain_add(sampler_, llama_sampler_init_temp(temperature));
-    llama_sampler_chain_add(sampler_, llama_sampler_init_top_p(top_p, 1));
-    llama_sampler_chain_add(sampler_, llama_sampler_init_dist(0));
-}
-
-void LlamaBridge::reset_sampler(float temperature, float top_p) {
-    if (sampler_) {
-        llama_sampler_free(sampler_);
-        sampler_ = nullptr;
-    }
-    init_sampler(temperature, top_p);
-}
-
 std::vector<llama_token> LlamaBridge::tokenize(const std::string& text, bool add_bos) const {
     std::vector<llama_token> tokens(text.size() + 16);
-    int32_t n = llama_tokenize(vocab_, text.c_str(), text.size(),
-                               tokens.data(), static_cast<int32_t>(tokens.size()),
-                               add_bos, true);
+    int32_t n = llama_tokenize(vocab_, text.c_str(), text.size(), tokens.data(),
+                               static_cast<int32_t>(tokens.size()), add_bos, true);
     if (n < 0) {
         tokens.resize(-n);
-        n = llama_tokenize(vocab_, text.c_str(), text.size(),
-                           tokens.data(), static_cast<int32_t>(tokens.size()),
-                           add_bos, true);
+        n = llama_tokenize(vocab_, text.c_str(), text.size(), tokens.data(),
+                           static_cast<int32_t>(tokens.size()), add_bos, true);
     }
     tokens.resize(n);
     return tokens;
 }
 
-bool LlamaBridge::decode(const std::vector<llama_token>& tokens, llama_seq_id seq_id,
-                         int32_t pos_start) {
-    const int32_t n_tokens = static_cast<int32_t>(tokens.size());
-    llama_batch batch = llama_batch_init(n_tokens, 0, 1);
-    batch.n_tokens = n_tokens;
-
-    for (int32_t i = 0; i < n_tokens; i++) {
-        batch.token[i]      = tokens[i];
-        batch.pos[i]        = pos_start + i;
-        batch.n_seq_id[i]   = 1;
-        batch.seq_id[i][0]  = seq_id;  // write INTO the allocated slot, not overwrite pointer
-        batch.logits[i]     = (i == n_tokens - 1) ? 1 : 0;
-    }
-
-    int status = llama_decode(ctx_.get(), batch);
-    llama_batch_free(batch);
-
-    if (status != 0) {
-        fprintf(stderr, "[radixforge] llama_decode failed with status %d\n", status);
-        return false;
-    }
-    return true;
-}
-
-bool LlamaBridge::decode_single(llama_token token, llama_seq_id seq_id, int32_t pos) {
-    llama_batch batch = llama_batch_init(1, 0, 1);
-    batch.n_tokens = 1;
-
-    batch.token[0]      = token;
-    batch.pos[0]        = pos;
-    batch.n_seq_id[0]   = 1;
-    batch.seq_id[0][0]  = seq_id;  // write INTO the allocated slot
-    batch.logits[0]     = 1;
-
-    int status = llama_decode(ctx_.get(), batch);
-    llama_batch_free(batch);
-
-    if (status != 0) {
-        fprintf(stderr, "[radixforge] decode_single failed with status %d\n", status);
-        return false;
-    }
-    return true;
-}
-
-llama_token LlamaBridge::sample() {
-    return llama_sampler_sample(sampler_, ctx_.get(), -1);
-}
-
-void LlamaBridge::memory_seq_cp(llama_seq_id src, llama_seq_id dst,
-                                 int32_t p0, int32_t p1) {
+void LlamaBridge::memory_seq_cp(llama_seq_id src, llama_seq_id dst, int32_t p0, int32_t p1) {
     llama_memory_t mem = llama_get_memory(ctx_.get());
     llama_memory_seq_cp(mem, src, dst, p0, p1);
 }
@@ -156,8 +86,7 @@ int32_t LlamaBridge::n_batch() const {
 }
 
 std::string LlamaBridge::apply_chat_template(
-    const std::vector<std::pair<std::string, std::string>>& messages) const
-{
+    const std::vector<std::pair<std::string, std::string>>& messages) const {
     std::vector<llama_chat_message> chat;
     chat.reserve(messages.size());
     for (const auto& [role, content] : messages) {
@@ -197,15 +126,18 @@ llama_sampler* LlamaBridge::create_sampler(float temperature, float top_p) const
 }
 
 void LlamaBridge::free_sampler(llama_sampler* sampler) {
-    if (sampler) llama_sampler_free(sampler);
+    if (sampler)
+        llama_sampler_free(sampler);
 }
 
 std::string LlamaBridge::model_name() const {
-    if (!model_) return "unknown";
+    if (!model_)
+        return "unknown";
     char buf[256] = {};
     // Try the standard GGUF general.name key first
     int n = llama_model_meta_val_str(model_.get(), "general.name", buf, sizeof(buf));
-    if (n > 0) return std::string(buf, n);
+    if (n > 0)
+        return std::string(buf, n);
     // Fallback: basename of the model path
     const std::string& p = config_.model_path;
     auto pos = p.rfind('/');

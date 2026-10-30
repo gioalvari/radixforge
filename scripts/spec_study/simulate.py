@@ -5,9 +5,8 @@ import argparse
 import json
 import statistics
 from collections import Counter, defaultdict
+from collections.abc import Sequence
 from pathlib import Path
-from typing import DefaultDict, Dict, Iterable, List, Sequence, Tuple
-
 
 RAW_DIR = Path("/tmp/spec_study")
 BASELINE = RAW_DIR / "server_none.jsonl"
@@ -17,15 +16,15 @@ MODES = ("local", "global", "global_outputs_only")
 
 def chunks_for_mode(
     mode: str,
-    prior: Sequence[Dict[str, object]],
-    prompt: List[int],
-    generated: List[int],
-) -> List[List[int]]:
+    prior: Sequence[dict[str, object]],
+    prompt: list[int],
+    generated: list[int],
+) -> list[list[int]]:
     """Return the draft-source streams available before the next target step."""
     local = prompt + generated
     if mode == "local":
         return [local]
-    previous: List[int] = []
+    previous: list[int] = []
     for record in prior:
         if mode == "global":
             previous.extend(
@@ -39,11 +38,11 @@ def chunks_for_mode(
 
 
 def candidates(
-    chunks: Sequence[List[int]],
-    context: List[int],
+    chunks: Sequence[list[int]],
+    context: list[int],
     m: int,
     maximum: int,
-) -> List[Tuple[int, int, int, Tuple[int, ...]]]:
+) -> list[tuple[int, int, int, tuple[int, ...]]]:
     """Find source continuations matching the longest target-context suffix.
 
     The return is (match length, source priority, continuation length, tokens).
@@ -52,13 +51,13 @@ def candidates(
     if len(context) < m:
         return []
     suffix = tuple(context[-m:])
-    index: DefaultDict[Tuple[int, ...], List[Tuple[int, int]]] = defaultdict(list)
+    index: defaultdict[tuple[int, ...], list[tuple[int, int]]] = defaultdict(list)
     for source_index, chunk in enumerate(chunks):
         for position in range(len(chunk) - m):
             index[tuple(chunk[position : position + m])].append(
                 (source_index, position)
             )
-    found: List[Tuple[int, int, int, Tuple[int, ...]]] = []
+    found: list[tuple[int, int, int, tuple[int, ...]]] = []
     for source_index, position in index[suffix]:
         chunk = chunks[source_index]
         before = 0
@@ -78,8 +77,8 @@ def candidates(
 
 
 def choose_draft(
-    chunks: Sequence[List[int]], context: List[int], m: int, k: int
-) -> List[int]:
+    chunks: Sequence[list[int]], context: list[int], m: int, k: int
+) -> list[int]:
     """Select an n-gram draft by longest match, local tie preference, then frequency."""
     found = candidates(chunks, context, m, k)
     if not found:
@@ -94,19 +93,19 @@ def choose_draft(
 
 
 def simulate_request(
-    record: Dict[str, object],
-    prior: Sequence[Dict[str, object]],
+    record: dict[str, object],
+    prior: Sequence[dict[str, object]],
     mode: str,
     m: int,
     k: int,
     adaptive: bool,
-) -> Dict[str, object]:
+) -> dict[str, object]:
     """Simulate greedy draft verification against the known lossless target output."""
     prompt = list(record["prompt_tokens"])
     target = list(record["output_tokens"])
-    generated: List[int] = []
+    generated: list[int] = []
     steps = drafted = accepted = steps_with_draft = 0
-    draft_lengths: List[int] = []
+    draft_lengths: list[int] = []
     last_accepted = 0
     while len(generated) < len(target):
         current_k = min(16, max(1, 2 * last_accepted + 1)) if adaptive else k
@@ -117,7 +116,9 @@ def simulate_request(
             steps_with_draft += 1
             drafted += len(proposed)
         exact = 0
-        for proposed_token, target_token in zip(proposed, target[len(generated) :]):
+        for proposed_token, target_token in zip(
+            proposed, target[len(generated) :], strict=False
+        ):
             if proposed_token != target_token:
                 break
             exact += 1
@@ -155,11 +156,11 @@ def main() -> None:
         for line in arguments.baseline.read_text(encoding="utf-8").splitlines()
         if line
     ]
-    results: List[Dict[str, object]] = []
+    results: list[dict[str, object]] = []
     for mode in MODES:
         for m in (2, 4):
             for k, adaptive in ((4, False), (8, False), (16, False), (0, True)):
-                prior: List[Dict[str, object]] = []
+                prior: list[dict[str, object]] = []
                 for record in records:
                     results.append(
                         simulate_request(record, prior, mode, m, k, adaptive)

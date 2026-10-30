@@ -1,0 +1,14 @@
+---
+Checks: >
+  -*,-bugprone-easily-swappable-parameters,
+  bugprone-*,
+  performance-*,
+  modernize-use-nullptr,
+  modernize-use-override,
+  modernize-use-default-member-init,
+  modernize-use-emplace,
+  modernize-make-unique
+HeaderFilterRegex: '^(include|src|test|tools)/'
+FormatStyle: file
+WarningsAsErrors: ''
+...

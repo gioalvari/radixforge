@@ -2,16 +2,18 @@
 """Build the deterministic cross-request speculation workload."""
 
 import json
+import os
 import random
 from pathlib import Path
-from typing import Any, Dict, List
-
+from typing import Any
 
 SEED = 20260925
 COUNT_PER_FAMILY = 25
 ROOT = Path(__file__).resolve().parents[2]
 OUT = ROOT / "data" / "spec_workload.jsonl"
-SOURCE_ROOT = Path("~/Project/personal/local-llm-bench-prefix")
+SOURCE_ROOT = Path(
+    os.environ.get("SPEC_SOURCE_ROOT", "~/local-llm-bench-prefix")
+).expanduser()
 
 TOOLS = [
     {
@@ -37,12 +39,12 @@ TOOLS = [
 ]
 
 
-def message(role: str, content: str) -> Dict[str, str]:
+def message(role: str, content: str) -> dict[str, str]:
     """Create an OpenAI-compatible chat message."""
     return {"role": role, "content": content}
 
 
-def tool_requests() -> List[Dict[str, Any]]:
+def tool_requests() -> list[dict[str, Any]]:
     """Create an agent loop whose prior actions are retained in each prompt."""
     system = (
         "You operate an order-support agent. Available tool schemas:\n"
@@ -62,8 +64,8 @@ def tool_requests() -> List[Dict[str, Any]]:
         ("update_order", "Hold order ORD-1042 while the replacement is checked."),
         ("search_catalog", "Find compatible filters for the compact heat pump."),
     ]
-    history: List[Dict[str, str]] = [message("system", system)]
-    requests: List[Dict[str, Any]] = []
+    history: list[dict[str, str]] = [message("system", system)]
+    requests: list[dict[str, Any]] = []
     for index in range(COUNT_PER_FAMILY):
         tool, instruction = steps[index % len(steps)]
         request_messages = history + [
@@ -100,7 +102,7 @@ def tool_requests() -> List[Dict[str, Any]]:
     return requests
 
 
-def code_requests() -> List[Dict[str, Any]]:
+def code_requests() -> list[dict[str, Any]]:
     """Create whole-file small-edit prompts from the supplied local source tree."""
     source_files = sorted((SOURCE_ROOT / "src" / "localllm_bench").glob("*.py"))
     operations = [
@@ -110,7 +112,7 @@ def code_requests() -> List[Dict[str, Any]]:
         "Rename the local variable `path` to `source_path` without changing behavior.",
         "Add a blank line between the import groups if the file does not already have one.",
     ]
-    requests: List[Dict[str, Any]] = []
+    requests: list[dict[str, Any]] = []
     for index in range(COUNT_PER_FAMILY):
         text = source_files[index % len(source_files)].read_text(encoding="utf-8")
         source = "\n".join(text.splitlines()[:120])
@@ -134,7 +136,7 @@ def code_requests() -> List[Dict[str, Any]]:
     return requests
 
 
-def doc_requests() -> List[Dict[str, Any]]:
+def doc_requests() -> list[dict[str, Any]]:
     """Create paragraph rewrite prompts using the supplied energy-market text."""
     paragraph = (
         (SOURCE_ROOT / "datasets" / "context" / "energy-market.txt")
@@ -167,7 +169,7 @@ def doc_requests() -> List[Dict[str, Any]]:
     ]
 
 
-def report_requests() -> List[Dict[str, Any]]:
+def report_requests() -> list[dict[str, Any]]:
     """Create strongly repetitive multi-agent structured-report prompts."""
     regions = [
         "Nordics",
@@ -197,7 +199,7 @@ def report_requests() -> List[Dict[str, Any]]:
 ```json
 {"region":"...","topic":"...","risk_level":"...","actions":["..."],"confidence":"..."}
 ```"""
-    requests: List[Dict[str, Any]] = []
+    requests: list[dict[str, Any]] = []
     for index in range(COUNT_PER_FAMILY):
         region = regions[index % len(regions)]
         topic = topics[index % len(topics)]
@@ -226,7 +228,7 @@ def main() -> None:
     """Write 100 requests in fixed interleaved order."""
     random.seed(SEED)
     families = [tool_requests(), code_requests(), doc_requests(), report_requests()]
-    records: List[Dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
     for turn in range(COUNT_PER_FAMILY):
         for family in families:
             record = dict(family[turn])

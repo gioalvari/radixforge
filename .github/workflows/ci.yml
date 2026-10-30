@@ -11,17 +11,103 @@ concurrency:
 
 jobs:
   build-test:
-    runs-on: macos-14  # Apple Silicon (arm64)
+    runs-on: macos-15 # Apple Silicon (arm64)
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
+      - name: Configure compiler cache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: macos-15-full
+
       - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DRADIXFORGE_WERROR=ON
 
       - name: Build
         run: cmake --build build -j "$(sysctl -n hw.ncpu)"
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+  unit-asan-ubsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure unit tests with AddressSanitizer and UndefinedBehaviorSanitizer
+        run: >-
+          cmake -B build-asan -DCMAKE_BUILD_TYPE=Debug
+          -DRADIXFORGE_UNIT_TESTS_ONLY=ON -DRADIXFORGE_BUILD_TOOLS=OFF
+          -DRADIXFORGE_WERROR=ON -DRADIXFORGE_SANITIZE=address,undefined
+
+      - name: Build unit tests
+        run: cmake --build build-asan -j 2
+
+      - name: Test unit tests
+        run: ctest --test-dir build-asan --output-on-failure
+
+  unit-tsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure unit tests with ThreadSanitizer
+        run: >-
+          cmake -B build-tsan -DCMAKE_BUILD_TYPE=Debug
+          -DRADIXFORGE_UNIT_TESTS_ONLY=ON -DRADIXFORGE_BUILD_TOOLS=OFF
+          -DRADIXFORGE_WERROR=ON -DRADIXFORGE_SANITIZE=thread
+
+      - name: Build unit tests
+        run: cmake --build build-tsan -j 2
+
+      - name: Test unit tests
+        run: ctest --test-dir build-tsan --output-on-failure
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Check C++ formatting
+        run: >-
+          find src include test tools -type f \( -name '*.cpp' -o -name '*.h' \) -print0 |
+          xargs -0 uvx clang-format==18.1.8 --dry-run --Werror
+
+      - name: Check Python lint and formatting
+        run: |
+          uvx ruff check scripts/
+          uvx ruff format --check scripts/
+
+  e2e-determinism:
+    needs: build-test
+    runs-on: macos-15
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Download tiny GGUF model
+        run: >-
+          curl --fail --location --retry 3 --retry-all-errors
+          --output /tmp/stories260K.gguf
+          https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories260K.gguf
+
+      - name: Configure
+        run: >-
+          cmake -B build-e2e -DCMAKE_BUILD_TYPE=Release -DRADIXFORGE_WERROR=ON
+          -DRADIXFORGE_E2E_MODEL=/tmp/stories260K.gguf
+
+      - name: Build server
+        run: cmake --build build-e2e --target radixforge -j "$(sysctl -n hw.ncpu)"
+
+      - name: Run deterministic cache test
+        run: ctest --test-dir build-e2e --output-on-failure -R '^e2e_determinism$'
