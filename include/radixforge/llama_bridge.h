@@ -46,19 +46,6 @@ public:
     // Tokenize a string into token IDs
     std::vector<llama_token> tokenize(const std::string& text, bool add_bos = true) const;
 
-    // Decode a batch of tokens for a given sequence
-    bool decode(const std::vector<llama_token>& tokens, llama_seq_id seq_id,
-                int32_t pos_start);
-
-    // Decode a single token with logits enabled (for cache-hit with no new tokens)
-    bool decode_single(llama_token token, llama_seq_id seq_id, int32_t pos);
-
-    // Sample the next token using the persistent sampler chain
-    llama_token sample();
-
-    // Recreate the sampler chain with new parameters
-    void reset_sampler(float temperature, float top_p);
-
     // Memory (KV cache) operations — uses llama_memory_* API
     void memory_seq_cp(llama_seq_id src, llama_seq_id dst, int32_t p0, int32_t p1);
     void memory_seq_rm(llama_seq_id seq_id, int32_t p0, int32_t p1);
@@ -73,13 +60,10 @@ public:
     std::string model_name() const;  // human-readable model name from GGUF metadata
 
 private:
-    void init_sampler(float temperature, float top_p);
-
     Config config_;
     LlamaModelPtr model_;
     LlamaContextPtr ctx_;
     const llama_vocab* vocab_ = nullptr;
-    llama_sampler* sampler_ = nullptr;
 };
 
 } // namespace radixforge

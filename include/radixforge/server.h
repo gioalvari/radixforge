@@ -45,9 +45,13 @@ struct InferenceRequest {
     // non-null only for the final callback.
     std::function<void(const std::string& token, bool is_last,
                        const InferenceStats* stats)> on_token;
+    // Reports a terminal request error before any generation can complete.
+    // The status is an HTTP status selected by the worker.
+    std::function<void(const std::string& message, int status)> on_error;
     // Returns true once the HTTP peer has disconnected or a synchronous request
     // has timed out. The worker polls it before admission and each decode step.
     std::function<bool()> cancelled;
+    std::chrono::steady_clock::time_point admitted_at;
 };
 
 // Internal prefill context.  It remains pending until every prompt token has
@@ -72,7 +76,6 @@ struct ActiveSeq {
     llama_sampler* sampler = nullptr;
     bool done = false;
     bool notify_on_retire = false;
-    bool generation_started = false;
     InferenceStats stats;
     std::chrono::steady_clock::time_point generation_started_at;
 };
@@ -102,7 +105,6 @@ private:
     std::condition_variable queue_cv_;
     std::atomic<bool> running_{false};
     std::thread worker_thread_;
-    uint64_t request_count_ = 0;
     std::atomic<int32_t> generating_sequences_{0};
     int32_t admit_window_ms_ = 2;
     std::atomic<uint64_t> decode_steps_{0};
@@ -113,10 +115,8 @@ private:
     // Step 1: tokenise + KV-prepare every request, build PrefillCtx list.
     //         Does NOT call llama_decode yet.
     std::vector<PrefillCtx> prepare_all(std::vector<InferenceRequest>& reqs,
-                                         std::vector<InferenceRequest>* deferred,
-                                         std::vector<InferenceRequest>* queued,
-                                         int32_t* prompt_budget,
-                                         bool allow_deferral = true);
+                                          std::vector<InferenceRequest>* deferred,
+                                          std::vector<InferenceRequest>* queued);
     void defer_to_front(std::vector<InferenceRequest>& deferred);
     // Run one fused llama_decode call: queued generation tokens plus as many
     // prompt tokens as fit in the remaining n_batch capacity.

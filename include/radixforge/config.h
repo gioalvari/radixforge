@@ -19,8 +19,8 @@ struct Config {
     // Server
     std::string host = "127.0.0.1";
     int32_t port     = 8400;
-    int32_t n_threads_http = 4;
     int32_t admit_window_ms = 2;  // idle-only request coalescing window
+    int32_t request_timeout_seconds = 300;
 
     // Generation defaults
     int32_t max_tokens   = 4096;

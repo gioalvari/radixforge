@@ -45,32 +45,12 @@ LlamaBridge::LlamaBridge(const Config& config) : config_(config) {
         throw std::runtime_error("Failed to create llama context");
     }
 
-    init_sampler(0.8f, 0.95f);
 }
 
 LlamaBridge::~LlamaBridge() {
-    if (sampler_) {
-        llama_sampler_free(sampler_);
-        sampler_ = nullptr;
-    }
     ctx_.reset();
     model_.reset();
     llama_backend_free();
-}
-
-void LlamaBridge::init_sampler(float temperature, float top_p) {
-    sampler_ = llama_sampler_chain_init(llama_sampler_chain_default_params());
-    llama_sampler_chain_add(sampler_, llama_sampler_init_temp(temperature));
-    llama_sampler_chain_add(sampler_, llama_sampler_init_top_p(top_p, 1));
-    llama_sampler_chain_add(sampler_, llama_sampler_init_dist(0));
-}
-
-void LlamaBridge::reset_sampler(float temperature, float top_p) {
-    if (sampler_) {
-        llama_sampler_free(sampler_);
-        sampler_ = nullptr;
-    }
-    init_sampler(temperature, top_p);
 }
 
 std::vector<llama_token> LlamaBridge::tokenize(const std::string& text, bool add_bos) const {
@@ -86,54 +66,6 @@ std::vector<llama_token> LlamaBridge::tokenize(const std::string& text, bool add
     }
     tokens.resize(n);
     return tokens;
-}
-
-bool LlamaBridge::decode(const std::vector<llama_token>& tokens, llama_seq_id seq_id,
-                         int32_t pos_start) {
-    const int32_t n_tokens = static_cast<int32_t>(tokens.size());
-    llama_batch batch = llama_batch_init(n_tokens, 0, 1);
-    batch.n_tokens = n_tokens;
-
-    for (int32_t i = 0; i < n_tokens; i++) {
-        batch.token[i]      = tokens[i];
-        batch.pos[i]        = pos_start + i;
-        batch.n_seq_id[i]   = 1;
-        batch.seq_id[i][0]  = seq_id;  // write INTO the allocated slot, not overwrite pointer
-        batch.logits[i]     = (i == n_tokens - 1) ? 1 : 0;
-    }
-
-    int status = llama_decode(ctx_.get(), batch);
-    llama_batch_free(batch);
-
-    if (status != 0) {
-        fprintf(stderr, "[radixforge] llama_decode failed with status %d\n", status);
-        return false;
-    }
-    return true;
-}
-
-bool LlamaBridge::decode_single(llama_token token, llama_seq_id seq_id, int32_t pos) {
-    llama_batch batch = llama_batch_init(1, 0, 1);
-    batch.n_tokens = 1;
-
-    batch.token[0]      = token;
-    batch.pos[0]        = pos;
-    batch.n_seq_id[0]   = 1;
-    batch.seq_id[0][0]  = seq_id;  // write INTO the allocated slot
-    batch.logits[0]     = 1;
-
-    int status = llama_decode(ctx_.get(), batch);
-    llama_batch_free(batch);
-
-    if (status != 0) {
-        fprintf(stderr, "[radixforge] decode_single failed with status %d\n", status);
-        return false;
-    }
-    return true;
-}
-
-llama_token LlamaBridge::sample() {
-    return llama_sampler_sample(sampler_, ctx_.get(), -1);
 }
 
 void LlamaBridge::memory_seq_cp(llama_seq_id src, llama_seq_id dst,

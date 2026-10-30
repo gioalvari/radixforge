@@ -70,20 +70,25 @@ class Parser {
 public:
     static JsonValue parse(const std::string& input) {
         Parser p(input);
-        auto val = p.parse_value();
+        auto val = p.parse_value(0);
+        p.skip_ws();
+        if (p.pos_ != input.size()) throw std::runtime_error("unexpected trailing JSON data");
         return val;
     }
 
 private:
     explicit Parser(const std::string& input) : src_(input), pos_(0) {}
 
-    JsonValue parse_value() {
+    static constexpr size_t kMaxDepth = 64;
+
+    JsonValue parse_value(size_t depth) {
+        if (depth > kMaxDepth) throw std::runtime_error("JSON nesting limit exceeded");
         skip_ws();
-        if (pos_ >= src_.size()) return JsonValue();
+        if (pos_ >= src_.size()) throw std::runtime_error("unexpected end of JSON input");
         char c = src_[pos_];
         if (c == '"') return parse_string_value();
-        if (c == '{') return parse_object();
-        if (c == '[') return parse_array();
+        if (c == '{') return parse_object(depth + 1);
+        if (c == '[') return parse_array(depth + 1);
         if (c == 't' || c == 'f') return parse_bool();
         if (c == 'n') return parse_null();
         return parse_number();
@@ -144,7 +149,7 @@ private:
         return result;
     }
 
-    JsonValue parse_object() {
+    JsonValue parse_object(size_t depth) {
         expect('{');
         JsonValue::Object obj;
         skip_ws();
@@ -154,7 +159,7 @@ private:
             std::string key = parse_string();
             skip_ws();
             expect(':');
-            JsonValue val = parse_value();
+            JsonValue val = parse_value(depth);
             obj.emplace(std::move(key), std::move(val));
             skip_ws();
             if (pos_ < src_.size() && src_[pos_] == ',') { pos_++; continue; }
@@ -165,13 +170,13 @@ private:
         return JsonValue(std::move(obj));
     }
 
-    JsonValue parse_array() {
+    JsonValue parse_array(size_t depth) {
         expect('[');
         JsonValue::Array arr;
         skip_ws();
         if (pos_ < src_.size() && src_[pos_] == ']') { pos_++; return JsonValue(std::move(arr)); }
         while (pos_ < src_.size()) {
-            arr.push_back(parse_value());
+            arr.push_back(parse_value(depth));
             skip_ws();
             if (pos_ < src_.size() && src_[pos_] == ',') { pos_++; continue; }
             break;

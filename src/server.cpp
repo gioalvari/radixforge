@@ -6,11 +6,15 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <iterator>
+#include <limits>
 #include <string>
 
 namespace radixforge {
+
+static std::string json_escape_s(const std::string& s);
 
 // --- InferenceWorker ---
 
@@ -33,6 +37,7 @@ void InferenceWorker::stop() {
 }
 
 void InferenceWorker::enqueue(InferenceRequest req) {
+    req.admitted_at = std::chrono::steady_clock::now();
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         queue_.push_back(std::move(req));
@@ -61,8 +66,7 @@ bool InferenceWorker::is_cancelled(const InferenceRequest& req) {
 // No llama_decode yet — just builds PrefillCtx for each request.
 std::vector<PrefillCtx> InferenceWorker::prepare_all(
     std::vector<InferenceRequest>& reqs, std::vector<InferenceRequest>* deferred,
-    std::vector<InferenceRequest>* queued, int32_t* prompt_budget,
-    bool allow_deferral) {
+    std::vector<InferenceRequest>* queued) {
 
     std::vector<PrefillCtx> ctxs;
     ctxs.reserve(reqs.size());
@@ -86,10 +90,8 @@ std::vector<PrefillCtx> InferenceWorker::prepare_all(
         int32_t available = bridge_.n_ctx() - (int32_t)tokens.size() - 4;
         if (available <= 0) {
             RF_WARN("worker", "Prompt too long (%zu tokens) for ctx %d — rejected",
-                    tokens.size(), bridge_.n_ctx());
-            if (req.on_token) {
-                req.on_token("[ERROR: prompt exceeds context window]", true, nullptr);
-            }
+                     tokens.size(), bridge_.n_ctx());
+            if (req.on_error) req.on_error("prompt exceeds context window", 400);
             continue;
         }
         if (req.max_tokens > available) {
@@ -101,7 +103,7 @@ std::vector<PrefillCtx> InferenceWorker::prepare_all(
         const PrefixAvailability availability = mapper_.inspect_prefix(tokens);
         const int32_t pending_advantage =
             availability.pending_tokens - availability.ready_tokens;
-        if (allow_deferral && pending_advantage > 0) {
+        if (pending_advantage > 0) {
             // Do not insert/allocate this request yet: the leading pending
             // request will become ready (or be released on failure) this run.
             // This prevents a copy from empty KV while retaining prefix sharing.
@@ -127,30 +129,19 @@ std::vector<PrefillCtx> InferenceWorker::prepare_all(
             break;
         } catch (const std::exception& e) {
             RF_ERROR("worker", "prepare_sequence failed: %s", e.what());
-            if (ctx.req.on_token) {
-                ctx.req.on_token("[ERROR: resource exhausted]", true, nullptr);
-            }
+            if (ctx.req.on_error) ctx.req.on_error("resource exhausted", 503);
             continue;
         }
 
-        const int32_t prompt_tokens = !ctx.prep.delta.empty()
-            ? static_cast<int32_t>(ctx.prep.delta.size())
-            : (ctx.prep.cached_pos > 0 ? 1 : 0);
-        if (prompt_budget && !ctxs.empty() &&
-            prompt_tokens > *prompt_budget) {
+        if (ctx.prep.delta.empty()) {
+            RF_ERROR("worker", "prepare_sequence returned an empty delta");
             mapper_.release_sequence(ctx.prep.seq_id, ctx.prep.leaf_node);
             tree_.release(ctx.prep.leaf_node);
-            if (queued) {
-                queued->push_back(std::move(ctx.req));
-                for (++req_index; req_index < reqs.size(); ++req_index) {
-                    if (!is_cancelled(reqs[req_index])) {
-                        queued->push_back(std::move(reqs[req_index]));
-                    }
-                }
+            if (ctx.req.on_error) {
+                ctx.req.on_error("internal cache preparation error", 500);
             }
-            break;
+            continue;
         }
-        if (prompt_budget) *prompt_budget -= std::min(prompt_tokens, *prompt_budget);
         ctx.delta_start = 0;
         ctx.stats.prompt_n = static_cast<int32_t>(ctx.prep.delta.size());
         ctx.stats.cache_n = ctx.prep.cached_pos;
@@ -232,9 +223,7 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
     int32_t prompt_tokens = 0;
     for (size_t i = 0; i < prefilling.size() && prompt_tokens < capacity; ++i) {
         auto& ctx = prefilling[i];
-        const int32_t total = !ctx.prep.delta.empty()
-            ? static_cast<int32_t>(ctx.prep.delta.size())
-            : (ctx.prep.cached_pos > 0 ? 1 : 0);
+        const int32_t total = static_cast<int32_t>(ctx.prep.delta.size());
         const int32_t remaining = total - ctx.delta_start;
         if (remaining <= 0) continue;
         const int32_t take = std::min(remaining, capacity - prompt_tokens);
@@ -242,12 +231,8 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
         const int32_t start = ctx.delta_start;
         for (int32_t offset = 0; offset < take; ++offset) {
             const int32_t prompt_index = start + offset;
-            batch.token[batch_idx] = !ctx.prep.delta.empty()
-                ? ctx.prep.delta[prompt_index]
-                : ctx.tokens[ctx.prep.cached_pos - 1];
-            batch.pos[batch_idx] = !ctx.prep.delta.empty()
-                ? ctx.prep.cached_pos + prompt_index
-                : ctx.prep.cached_pos;
+            batch.token[batch_idx] = ctx.prep.delta[prompt_index];
+            batch.pos[batch_idx] = ctx.prep.cached_pos + prompt_index;
             batch.n_seq_id[batch_idx] = 1;
             batch.seq_id[batch_idx][0] = ctx.prep.seq_id;
             batch.logits[batch_idx] = completes && offset == take - 1 ? 1 : 0;
@@ -274,21 +259,39 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
     }
     llama_batch_free(batch);
 
+    auto fail_active = [this](ActiveSeq& seq, const char* message, int status) {
+        if (seq.req.on_error && !is_cancelled(seq.req)) {
+            seq.req.on_error(message, status);
+        }
+        LlamaBridge::free_sampler(seq.sampler);
+        mapper_.release_sequence(seq.seq_id, seq.leaf_node);
+        tree_.release(seq.leaf_node);
+    };
+    auto fail_prefill = [this](PrefillCtx& ctx, const char* message, int status) {
+        if (ctx.req.on_error && !is_cancelled(ctx.req)) {
+            ctx.req.on_error(message, status);
+        }
+        mapper_.release_sequence(ctx.prep.seq_id, ctx.prep.leaf_node);
+        tree_.release(ctx.prep.leaf_node);
+    };
     if (decode_status == 1) {
-        RF_WARN("worker", "Step stalled by full KV cache; keeping sequences queued");
+        RF_WARN("worker", "Step stalled by full KV cache; failing newest sequence");
+        if (!seqs.empty()) {
+            fail_active(seqs.back(), "KV cache is full", 503);
+            seqs.pop_back();
+        } else if (!prefilling.empty()) {
+            fail_prefill(prefilling.back(), "KV cache is full", 503);
+            prefilling.pop_back();
+        }
         return;
     }
-    if (decode_status < 0) {
+    if (decode_status != 0) {
         RF_ERROR("worker", "Fused batch decode failed (%d seqs, %d prompt tokens, status %d)",
                  decoding, prompt_tokens, decode_status);
-        for (auto& seq : seqs) retire(seq, true);
+        for (auto& seq : seqs) fail_active(seq, "inference decode failed", 500);
         seqs.clear();
         for (auto& ctx : prefilling) {
-            if (ctx.req.on_token && !is_cancelled(ctx.req)) {
-                ctx.req.on_token("[ERROR: prefill failed]", true, nullptr);
-            }
-            mapper_.release_sequence(ctx.prep.seq_id, ctx.prep.leaf_node);
-            tree_.release(ctx.prep.leaf_node);
+            fail_prefill(ctx, "inference prefill failed", 500);
         }
         prefilling.clear();
         return;
@@ -306,9 +309,7 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
     for (const auto& submission : submissions) {
         auto& ctx = prefilling[submission.ctx_index];
         ctx.delta_start += submission.tokens;
-        const int32_t total = !ctx.prep.delta.empty()
-            ? static_cast<int32_t>(ctx.prep.delta.size())
-            : (ctx.prep.cached_pos > 0 ? 1 : 0);
+        const int32_t total = static_cast<int32_t>(ctx.prep.delta.size());
         if (ctx.delta_start == total) {
             mapper_.mark_sequence_ready(ctx.prep.seq_id, ctx.prep.leaf_node);
             prompt_logits[submission.ctx_index] = submission.logit_index;
@@ -368,6 +369,8 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
         }
         llama_sampler* sampler = bridge_.create_sampler(ctx.req.temperature, ctx.req.top_p);
         const llama_token first_tok = llama_sampler_sample(sampler, bridge_.ctx(), logit_index);
+        ctx.stats.prompt_ms = std::chrono::duration<double, std::milli>(
+            now - ctx.req.admitted_at).count();
         if (llama_vocab_is_eog(bridge_.vocab(), first_tok)) {
             if (ctx.req.on_token) ctx.req.on_token("", true, &ctx.stats);
             LlamaBridge::free_sampler(sampler);
@@ -393,9 +396,8 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
             completed_prefills.push_back(index);
             continue;
         }
-        const int32_t end_pos = ctx.prep.delta.empty()
-            ? ctx.prep.cached_pos + 1
-            : ctx.prep.cached_pos + static_cast<int32_t>(ctx.prep.delta.size());
+        const int32_t end_pos = ctx.prep.cached_pos +
+                                static_cast<int32_t>(ctx.prep.delta.size());
         ActiveSeq seq;
         seq.seq_id = ctx.prep.seq_id;
         seq.leaf_node = ctx.prep.leaf_node;
@@ -405,7 +407,6 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs,
         seq.sampler = sampler;
         seq.stats = ctx.stats;
         seq.req = std::move(ctx.req);
-        seq.generation_started = true;
         seq.generation_started_at = now;
         newly_active.push_back(std::move(seq));
         completed_prefills.push_back(index);
@@ -449,7 +450,7 @@ void InferenceWorker::run() {
             if (!pending.empty()) {
                 std::vector<InferenceRequest> deferred;
                 std::vector<InferenceRequest> queued;
-                auto ctxs = prepare_all(pending, &deferred, &queued, nullptr);
+                auto ctxs = prepare_all(pending, &deferred, &queued);
                 prepared_count = ctxs.size();
                 prefilling.insert(prefilling.end(), std::make_move_iterator(ctxs.begin()),
                                   std::make_move_iterator(ctxs.end()));
@@ -465,8 +466,6 @@ void InferenceWorker::run() {
             fused_step(active, prefilling, prepared_count);
             generating_sequences_.store(static_cast<int32_t>(active.size()),
                                         std::memory_order_relaxed);
-            ++request_count_;
-            if (request_count_ % 64 == 0) mapper_.defrag();
         } catch (const std::exception& e) {
             RF_WARN("worker", "Worker loop exception (non-fatal): %s", e.what());
         } catch (...) {
@@ -515,6 +514,12 @@ static std::string usage_json(const InferenceStats& stats) {
            std::to_string(stats.prompt_tokens + stats.predicted_n) + "}";
 }
 
+static std::string error_json(const std::string& message,
+                              const std::string& type = "server_error") {
+    return "{\"error\":{\"message\":\"" + json_escape_s(message) +
+           "\",\"type\":\"" + type + "\"}}";
+}
+
 static void parse_request_body(const httplib::Request& req_http,
                                InferenceRequest& req,
                                const Config& config) {
@@ -533,10 +538,20 @@ static void parse_request_body(const httplib::Request& req_http,
         req.prompt = body["prompt"].as_string();
     }
 
-    if (body.contains("max_tokens") && body["max_tokens"].type() == json::Type::Number)
-        req.max_tokens = (int32_t)body["max_tokens"].as_number();
-    else
+    if (body.contains("max_tokens")) {
+        if (body["max_tokens"].type() != json::Type::Number) {
+            throw std::invalid_argument("max_tokens must be a number");
+        }
+        const double max_tokens = body["max_tokens"].as_number();
+        if (!std::isfinite(max_tokens) || max_tokens < 0 ||
+            max_tokens > std::numeric_limits<int32_t>::max() ||
+            std::floor(max_tokens) != max_tokens) {
+            throw std::invalid_argument("max_tokens must be a non-negative int32");
+        }
+        req.max_tokens = static_cast<int32_t>(max_tokens);
+    } else {
         req.max_tokens = config.max_tokens;
+    }
 
     if (body.contains("temperature") && body["temperature"].type() == json::Type::Number)
         req.temperature = (float)body["temperature"].as_number();
@@ -568,6 +583,22 @@ static std::string json_escape_s(const std::string& s) {
         }
     }
     return out;
+}
+
+static size_t complete_utf8_prefix_length(const std::string& text) {
+    if (text.empty()) return 0;
+    size_t start = text.size();
+    while (start > 0 && (static_cast<unsigned char>(text[start - 1]) & 0xC0) == 0x80) {
+        --start;
+    }
+    if (start == text.size()) return text.size();
+
+    const unsigned char lead = static_cast<unsigned char>(text[start]);
+    const size_t expected = lead >= 0xF0 && lead <= 0xF4 ? 4 :
+                            lead >= 0xE0 && lead <= 0xEF ? 3 :
+                            lead >= 0xC2 && lead <= 0xDF ? 2 : 1;
+    const size_t available = text.size() - start;
+    return available < expected ? start : text.size();
 }
 
 void Server::start() {
@@ -642,42 +673,22 @@ void Server::start() {
         res.set_content(tree_.to_json(), "application/json");
     });
 
-    // /admin/seq/:id — force-evict a specific physical sequence (auth required)
-    svr.Delete(R"(/admin/seq/(\d+))", [this](const httplib::Request& req, httplib::Response& res) {
-        if (!check_admin_auth(config_, req, res)) return;
-        llama_seq_id target;
-        try { target = static_cast<llama_seq_id>(std::stoi(req.matches[1])); }
-        catch (...) {
-            res.status = 400;
-            res.set_content("{\"error\":\"invalid seq_id\"}", "application/json");
-            return;
-        }
-        bool ok = mapper_.force_evict_seq(target);
-        res.set_header("Access-Control-Allow-Origin", "*");
-        if (ok) {
-            res.set_content("{\"status\":\"evicted\",\"seq_id\":" +
-                            std::to_string(target) + "}", "application/json");
-        } else {
-            res.status = 404;
-            res.set_content("{\"error\":\"seq_id not found or already free\"}", "application/json");
-        }
-    });
-
     // Chat completions (non-streaming)
-    auto handle_chat = [this](const httplib::Request& req_http,
-                               httplib::Response& res) {
+    auto handle_completion = [this](bool is_chat, const httplib::Request& req_http,
+                                    httplib::Response& res) {
         InferenceRequest req;
         try {
             parse_request_body(req_http, req, config_);
-        } catch (...) {
+        } catch (const std::exception& e) {
             res.status = 400;
-            res.set_content("{\"error\":\"invalid request body\"}", "application/json");
+            res.set_content(error_json(e.what(), "invalid_request_error"), "application/json");
             return;
         }
 
         if (req.prompt.empty() && req.messages.empty()) {
             res.status = 400;
-            res.set_content("{\"error\":\"no prompt or messages\"}", "application/json");
+            res.set_content(error_json("no prompt or messages", "invalid_request_error"),
+                            "application/json");
             return;
         }
 
@@ -692,6 +703,7 @@ void Server::start() {
                 std::atomic<bool> cancelled{false};
                 bool enqueued = false;
                 bool done = false;
+                std::string incomplete_utf8;
             };
             auto state = std::make_shared<StreamState>();
 
@@ -705,8 +717,8 @@ void Server::start() {
                             // The sink is valid until this provider returns. The
                             // mutex synchronizes disconnect with worker writes.
                             req.on_token = [state, &sink](const std::string& token,
-                                                           bool is_last,
-                                                           const InferenceStats* stats) {
+                                                            bool is_last,
+                                                            const InferenceStats* stats) {
                                 std::lock_guard<std::mutex> token_lk(state->mtx);
                                 if (state->cancelled.load(std::memory_order_relaxed)) return;
                                 if (!sink.is_writable()) {
@@ -715,9 +727,17 @@ void Server::start() {
                                     state->cv.notify_one();
                                     return;
                                 }
+                                std::string content = state->incomplete_utf8 + token;
+                                const size_t complete_length = complete_utf8_prefix_length(content);
+                                state->incomplete_utf8 = content.substr(complete_length);
+                                content.resize(complete_length);
+                                if (!state->incomplete_utf8.empty() && is_last) {
+                                    content += state->incomplete_utf8;
+                                    state->incomplete_utf8.clear();
+                                }
                                 std::string chunk =
                                     "data: {\"choices\":[{\"delta\":{\"content\":\""
-                                    + json_escape_s(token) + "\"},\"finish_reason\":"
+                                    + json_escape_s(content) + "\"},\"finish_reason\":"
                                     + (is_last ? "\"stop\"" : "null")
                                     + (is_last && stats
                                            ? "}],\"timings\":" + timings_json(*stats) +
@@ -737,6 +757,19 @@ void Server::start() {
                                     state->done = true;
                                     state->cv.notify_one();
                                 }
+                            };
+                            req.on_error = [state, &sink](const std::string& message, int status) {
+                                std::lock_guard<std::mutex> token_lk(state->mtx);
+                                if (state->cancelled.load(std::memory_order_relaxed)) return;
+                                const std::string event = "data: " + error_json(
+                                    message, status == 400 ? "invalid_request_error" : "server_error") +
+                                    "\n\n";
+                                if (!sink.is_writable() || !sink.write(event.c_str(), event.size()) ||
+                                    !sink.write("data: [DONE]\n\n", 14)) {
+                                    state->cancelled.store(true, std::memory_order_relaxed);
+                                }
+                                state->done = true;
+                                state->cv.notify_one();
                             };
                             req.cancelled = [state] {
                                 return state->cancelled.load(std::memory_order_relaxed);
@@ -782,6 +815,8 @@ void Server::start() {
                 InferenceStats stats;
                 std::atomic<bool> cancelled{false};
                 bool done = false;
+                int error_status = 0;
+                std::string error_message;
             };
             auto state = std::make_shared<NonStreamState>();
 
@@ -800,32 +835,67 @@ void Server::start() {
             req.cancelled = [state] {
                 return state->cancelled.load(std::memory_order_relaxed);
             };
+            req.on_error = [state](const std::string& message, int status) {
+                if (state->cancelled.load(std::memory_order_relaxed)) return;
+                std::lock_guard<std::mutex> lk(state->mtx);
+                state->error_status = status;
+                state->error_message = message;
+                state->done = true;
+                state->cv.notify_one();
+            };
 
             worker_.enqueue(std::move(req));
 
             std::unique_lock<std::mutex> lk(state->mtx);
-            bool completed = state->cv.wait_for(lk, std::chrono::seconds(60),
-                                                [&]{ return state->done; });
+            bool completed = state->cv.wait_for(
+                lk, std::chrono::seconds(config_.request_timeout_seconds),
+                                                 [&]{ return state->done; });
             if (!completed) {
                 // Mark cancelled BEFORE returning so the worker's on_token is a no-op.
                 state->cancelled.store(true, std::memory_order_relaxed);
                 res.status = 504;
-                res.set_content("{\"error\":\"inference timeout\"}", "application/json");
+                res.set_content(error_json("inference timeout", "timeout_error"),
+                                "application/json");
                 return;
             }
 
-            std::string json_resp =
-                "{\"choices\":[{\"message\":{\"role\":\"assistant\","
-                "\"content\":\"" + json_escape_s(state->full_response) +
-                "\"},\"finish_reason\":\"stop\"}],\"timings\":" +
-                timings_json(state->stats) + ",\"usage\":" +
-                usage_json(state->stats) + "}";
+            if (state->error_status != 0) {
+                res.status = state->error_status;
+                res.set_content(error_json(state->error_message,
+                                           state->error_status == 400
+                                               ? "invalid_request_error"
+                                               : "server_error"),
+                                "application/json");
+                return;
+            }
+
+            std::string json_resp;
+            if (is_chat) {
+                json_resp = "{\"object\":\"chat.completion\",\"choices\":[{\"message\":{"
+                            "\"role\":\"assistant\",\"content\":\"" +
+                            json_escape_s(state->full_response) +
+                            "\"},\"finish_reason\":\"stop\"}],\"timings\":" +
+                            timings_json(state->stats) + ",\"usage\":" +
+                            usage_json(state->stats) + "}";
+            } else {
+                json_resp = "{\"object\":\"text_completion\",\"choices\":[{\"text\":\"" +
+                            json_escape_s(state->full_response) +
+                            "\",\"finish_reason\":\"stop\"}],\"timings\":" +
+                            timings_json(state->stats) + ",\"usage\":" +
+                            usage_json(state->stats) + "}";
+            }
             res.set_content(json_resp, "application/json");
         }
     };
 
-    svr.Post("/v1/chat/completions", handle_chat);
-    svr.Post("/v1/completions",       handle_chat);
+    svr.Post("/v1/chat/completions", [handle_completion](const httplib::Request& req,
+                                                           httplib::Response& res) {
+        handle_completion(true, req, res);
+    });
+    svr.Post("/v1/completions", [handle_completion](const httplib::Request& req,
+                                                      httplib::Response& res) {
+        handle_completion(false, req, res);
+    });
 
     // stop_fn_ captures svr_p by value — shared_ptr keeps server alive
     // even after start() returns, so stop() called from signal handler is safe.
