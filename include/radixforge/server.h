@@ -78,6 +78,8 @@ struct ActiveSeq {
     bool notify_on_retire = false;
     InferenceStats stats;
     std::chrono::steady_clock::time_point generation_started_at;
+    // Prompt plus generated tokens whose KV cells have actually been decoded.
+    std::vector<llama_token> cached_tokens;
 };
 
 // Single-threaded inference worker with continuous batching. New requests are

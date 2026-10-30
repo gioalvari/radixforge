@@ -80,6 +80,11 @@ public:
     // prefill llama_decode call has succeeded.
     void mark_sequence_ready(llama_seq_id seq_id, RadixNode* node);
 
+    // Associate a ready sequence with its complete valid KV token prefix.
+    // The returned node owns seq_id; callers retain their original node ref.
+    RadixNode* extend_sequence(llama_seq_id seq_id, RadixNode* node,
+                               const std::vector<llama_token>& tokens);
+
     // Inspect ready and pending cache coverage without allocating a seq_id.
     PrefixAvailability inspect_prefix(const std::vector<llama_token>& prompt_tokens) const;
 

@@ -146,12 +146,42 @@ static void test_exhaustion_releases_insert_reference() {
     tree.release(reusable.leaf_node);
 }
 
+static void test_generated_tokens_extend_retained_cache() {
+    printf("\n[test_generated_tokens_extend_retained_cache]\n");
+    RecordingKvOps ops;
+    radixforge::RadixTree tree;
+    radixforge::KVMapper mapper(ops, tree, config_with_sequences(3));
+
+    const auto prompt = tok({1, 2, 3});
+    auto prepared = mapper.prepare_sequence(prompt);
+    mapper.mark_sequence_ready(prepared.seq_id, prepared.leaf_node);
+    const auto with_generated = tok({1, 2, 3, 4, 5});
+    radixforge::RadixNode* extended =
+        mapper.extend_sequence(prepared.seq_id, prepared.leaf_node, with_generated);
+    mapper.release_sequence(prepared.seq_id, extended);
+    tree.release(prepared.leaf_node);
+
+    const auto follow_up = tok({1, 2, 3, 4, 5, 6, 7});
+    auto next = mapper.prepare_sequence(follow_up);
+    CHECK(next.cached_pos == 5,
+          "follow-up copies the full prompt plus decoded generated tokens");
+    CHECK(next.delta.size() == 2 && next.delta[0] == 6,
+          "follow-up decodes only tokens beyond the retained generated prefix");
+    CHECK(!ops.calls.empty() && ops.calls.back().type == Call::Type::Copy &&
+              ops.calls.back().p1 == 5,
+          "follow-up KV copy uses the full generated-token cache coverage");
+
+    mapper.release_sequence(next.seq_id, next.leaf_node);
+    tree.release(next.leaf_node);
+}
+
 int main() {
     printf("=== KVMapper Unit Tests ===\n");
     test_retained_sequence_is_trimmed();
     test_full_cache_hit_decodes_final_prompt_token();
     test_double_release_does_not_duplicate_free_id();
     test_exhaustion_releases_insert_reference();
+    test_generated_tokens_extend_retained_cache();
 
     printf("\nResults: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

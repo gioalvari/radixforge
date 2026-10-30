@@ -108,6 +108,13 @@ void KVMapper::mark_sequence_ready(llama_seq_id seq_id, RadixNode* node) {
     tree_.mark_seq_id_ready(node, seq_id);
 }
 
+RadixNode* KVMapper::extend_sequence(llama_seq_id seq_id, RadixNode* node,
+                                     const std::vector<llama_token>& tokens) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return tree_.extend_seq_id(node, seq_id, tokens,
+                               static_cast<int32_t>(tokens.size()));
+}
+
 PrefixAvailability KVMapper::inspect_prefix(
     const std::vector<llama_token>& prompt_tokens) const {
     std::lock_guard<std::mutex> lock(mutex_);

@@ -82,6 +82,12 @@ public:
     void mark_seq_id_ready(RadixNode* node, llama_seq_id seq_id);
     bool release_seq_id(RadixNode* node, llama_seq_id seq_id);
 
+    // Move a ready sequence to the node representing its complete valid KV
+    // token prefix. The caller retains its reference to the original node.
+    RadixNode* extend_seq_id(RadixNode* node, llama_seq_id seq_id,
+                             const std::vector<llama_token>& tokens,
+                             int32_t canonical_len);
+
     // Find a physical sequence covering node's prefix under the tree lock.
     // Evicted ids are removed before this method can return them.
     llama_seq_id find_covering_seq_id(const RadixNode* node,
