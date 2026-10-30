@@ -5,13 +5,10 @@ import json
 import os
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List
-
+from typing import Any
 
 MODEL = Path(
-    os.environ.get(
-        "RADIXFORGE_MODEL", "~/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf"
-    )
+    os.environ.get("RADIXFORGE_MODEL", "~/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf")
 ).expanduser()
 OUT = Path("/tmp/spec_study/cost_curve.json")
 
@@ -70,15 +67,15 @@ def main() -> None:
     completed = subprocess.run(command, check=True, capture_output=True, text=True)
     parsed = first_json(completed.stdout)
     # Prompt-only benchmarks report prompt token/s; test positions map to 1+k tokens.
-    rows: List[Dict[str, float]] = []
-    candidates: List[Any] = []
+    rows: list[dict[str, float]] = []
+    candidates: list[Any] = []
     if isinstance(parsed, list):
         candidates = parsed
     elif isinstance(parsed, dict):
         candidates = parsed.get("results", parsed.get("benchmarks", []))
     if not isinstance(candidates, list) or len(candidates) < len(draft_lengths):
         raise RuntimeError(f"unexpected llama-bench rows: {parsed}")
-    for draft_length, row in zip(draft_lengths, candidates):
+    for draft_length, row in zip(draft_lengths, candidates, strict=False):
         rate = numeric_rate(row)
         tokens = draft_length + 1
         rows.append(

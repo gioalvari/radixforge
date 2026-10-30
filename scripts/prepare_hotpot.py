@@ -25,7 +25,6 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-
 SEED = 20260925
 COUNT = 100
 SOURCE_URL = "http://curtis.ml.cmu.edu/datasets/hotpot/hotpot_dev_distractor_v1.json"

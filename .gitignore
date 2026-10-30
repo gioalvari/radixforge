@@ -1,5 +1,6 @@
 # Build artifacts
 build/
+build-*/
 
 # Downloaded models (can be large)
 models/

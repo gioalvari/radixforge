@@ -2,11 +2,10 @@
 """Summarize raw study artifacts in the checked-in specification document."""
 
 import json
-import statistics
 from collections import defaultdict
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence, Tuple
-
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 RAW = Path("/tmp/spec_study")
@@ -15,7 +14,7 @@ FAMILIES = ("tool_json", "code_edit", "doc_rewrite", "agent_reports", "overall")
 CONFIGS = ("none", "ngram_mod", "ngram_simple", "ngram_cache")
 
 
-def rows(path: Path) -> List[Dict[str, Any]]:
+def rows(path: Path) -> list[dict[str, Any]]:
     """Load a JSONL file."""
     return [
         json.loads(line)
@@ -24,7 +23,7 @@ def rows(path: Path) -> List[Dict[str, Any]]:
     ]
 
 
-def family_rows(records: Iterable[Dict[str, Any]], family: str) -> List[Dict[str, Any]]:
+def family_rows(records: Iterable[dict[str, Any]], family: str) -> list[dict[str, Any]]:
     """Select a family, with overall representing all records."""
     return [
         record
@@ -33,7 +32,7 @@ def family_rows(records: Iterable[Dict[str, Any]], family: str) -> List[Dict[str
     ]
 
 
-def timing(record: Dict[str, Any]) -> Tuple[float, float]:
+def timing(record: dict[str, Any]) -> tuple[float, float]:
     """Return generated tokens and server prediction milliseconds where available."""
     response = record["response"]
     timings = response.get("timings", {}) if isinstance(response, dict) else {}
@@ -44,23 +43,23 @@ def timing(record: Dict[str, Any]) -> Tuple[float, float]:
     return tokens, milliseconds
 
 
-def server_summary() -> Tuple[Dict[str, Dict[str, Dict[str, float]]], List[str]]:
+def server_summary() -> tuple[dict[str, dict[str, dict[str, float]]], list[str]]:
     """Aggregate measured server rates and check greedy output identity."""
     loaded = {name: rows(RAW / f"server_{name}.jsonl") for name in CONFIGS}
     baseline = {record["id"]: record["output"] for record in loaded["none"]}
-    mismatches: List[str] = []
+    mismatches: list[str] = []
     for name, records in loaded.items():
         if name == "none":
             continue
         for record in records:
             if baseline.get(record["id"]) != record["output"]:
                 mismatches.append(f"{name}:{record['id']}")
-    summary: Dict[str, Dict[str, Dict[str, float]]] = defaultdict(dict)
+    summary: dict[str, dict[str, dict[str, float]]] = defaultdict(dict)
     for name, records in loaded.items():
         for family in FAMILIES:
             selected = family_rows(records, family)
             generated, milliseconds = map(
-                sum, zip(*(timing(record) for record in selected))
+                sum, zip(*(timing(record) for record in selected), strict=False)
             )
             draft_n = draft_accepted = 0.0
             exposed = 0
@@ -82,7 +81,7 @@ def server_summary() -> Tuple[Dict[str, Dict[str, Dict[str, float]]], List[str]]
     return summary, mismatches
 
 
-def interpolate_cost(length: int, costs: Dict[int, float]) -> float:
+def interpolate_cost(length: int, costs: dict[int, float]) -> float:
     """Linearly interpolate measured verification relative costs."""
     lower = max(key for key in costs if key <= length)
     upper = min(key for key in costs if key >= length)
@@ -92,13 +91,13 @@ def interpolate_cost(length: int, costs: Dict[int, float]) -> float:
     return costs[lower] + ratio * (costs[upper] - costs[lower])
 
 
-def simulation_summary() -> Dict[Tuple[str, int, str], Dict[str, Dict[str, float]]]:
+def simulation_summary() -> dict[tuple[str, int, str], dict[str, dict[str, float]]]:
     """Aggregate simulation metrics, including cost-curve estimated speedup."""
     cost_rows = json.loads((RAW / "cost_curve.json").read_text(encoding="utf-8"))[
         "rows"
     ]
     costs = {int(row["draft_length"]): float(row["relative_cost"]) for row in cost_rows}
-    grouped: Dict[Tuple[str, int, str, str], List[Dict[str, Any]]] = defaultdict(list)
+    grouped: dict[tuple[str, int, str, str], list[dict[str, Any]]] = defaultdict(list)
     for record in rows(RAW / "simulation.jsonl"):
         grouped[
             (record["mode"], int(record["m"]), str(record["k"]), record["family"])
@@ -106,7 +105,7 @@ def simulation_summary() -> Dict[Tuple[str, int, str], Dict[str, Dict[str, float
         grouped[(record["mode"], int(record["m"]), str(record["k"]), "overall")].append(
             record
         )
-    result: Dict[Tuple[str, int, str], Dict[str, Dict[str, float]]] = {}
+    result: dict[tuple[str, int, str], dict[str, dict[str, float]]] = {}
     for key, selected in grouped.items():
         mode, m, k, family = key
         total_tokens = sum(int(record["output_tokens"]) for record in selected)
@@ -177,7 +176,7 @@ def main() -> None:
         "Decode rate uses `timings.predicted_n / timings.predicted_ms`; speedup is against `none` in that family. "
         "Draft acceptance is `draft_n_accepted / draft_n` when the server exposes both fields.",
     ]
-    server_body: List[List[str]] = []
+    server_body: list[list[str]] = []
     for family in FAMILIES:
         for config in CONFIGS:
             values = server[family][config]
@@ -223,7 +222,7 @@ def main() -> None:
             "",
         ]
     )
-    sim_body: List[List[str]] = []
+    sim_body: list[list[str]] = []
     for family in FAMILIES:
         local = simulation[selected_key][family]
         shared = simulation[global_key][family]
@@ -282,7 +281,7 @@ def main() -> None:
             "",
         ]
     )
-    estimate_body: List[List[str]] = []
+    estimate_body: list[list[str]] = []
     for family in FAMILIES:
         local = simulation[selected_key][family]["estimated_speedup"]
         shared = simulation[global_key][family]["estimated_speedup"]
