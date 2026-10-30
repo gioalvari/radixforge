@@ -9,13 +9,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <csignal>
+#include <chrono>
 #include <string>
 
-static radixforge::Server* g_server = nullptr;
+static volatile std::sig_atomic_t g_shutdown_requested = 0;
 
 static void signal_handler(int) {
-    if (g_server)
-        g_server->stop();
+    g_shutdown_requested = 1;
 }
 
 static void print_usage(const char* prog) {
@@ -32,6 +32,9 @@ static void print_usage(const char* prog) {
         "  --max-seq <n>              Max concurrent sequences (default: 32)\n"
         "  --admit-window-ms <n>      Idle request coalescing window (default: 2)\n"
         "  --request-timeout <seconds> Non-streaming request timeout (default: 300)\n"
+        "  --shutdown-timeout <seconds> Graceful shutdown drain timeout (default: 10)\n"
+        "  --max-body-bytes <n>       Maximum HTTP request body size (default: 8388608)\n"
+        "  --no-prefix-cache          Disable prefix reuse and cache retention\n"
         "  --kv-high-watermark <0..1> Evict idle KV above this context fraction (default: 0.9)\n"
         "  --admin-token <token>      Bearer token for /admin/* endpoints (default: none)\n"
         "  --log-level <level>        Log level: debug|info|warn|error (default: info)\n"
@@ -61,6 +64,12 @@ int main(int argc, char** argv) {
             config.admit_window_ms = std::max(0, std::atoi(argv[++i]));
         } else if (arg == "--request-timeout" && i + 1 < argc) {
             config.request_timeout_seconds = std::max(1, std::atoi(argv[++i]));
+        } else if (arg == "--shutdown-timeout" && i + 1 < argc) {
+            config.shutdown_timeout_seconds = std::max(0, std::atoi(argv[++i]));
+        } else if (arg == "--max-body-bytes" && i + 1 < argc) {
+            config.max_body_bytes = std::strtoull(argv[++i], nullptr, 10);
+        } else if (arg == "--no-prefix-cache") {
+            config.prefix_cache_enabled = false;
         } else if (arg == "--kv-high-watermark" && i + 1 < argc) {
             const float value = std::strtof(argv[++i], nullptr);
             if (value <= 0.0f || value > 1.0f) {
@@ -117,9 +126,18 @@ int main(int argc, char** argv) {
     worker.start();
 
     radixforge::Server server(config, worker, mapper, tree);
-    g_server = &server;
-
-    server.start(); // blocks until shutdown
+    std::thread server_thread([&server] { server.start(); });
+    while (!g_shutdown_requested) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    server.begin_drain();
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::seconds(config.shutdown_timeout_seconds);
+    while (!worker.is_idle() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    server.stop();
+    server_thread.join();
 
     worker.stop();
     RF_INFO("main", "Shutdown complete.");

@@ -259,7 +259,7 @@ void RadixTree::mark_seq_id_ready(RadixNode* node, llama_seq_id seq_id) {
     }
 }
 
-bool RadixTree::release_seq_id(RadixNode* node, llama_seq_id seq_id) {
+bool RadixTree::release_seq_id(RadixNode* node, llama_seq_id seq_id, bool retain) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     if (!node)
         return false;
@@ -268,7 +268,7 @@ bool RadixTree::release_seq_id(RadixNode* node, llama_seq_id seq_id) {
     if (it == node->seq_ids.end())
         return false;
     const bool is_ready = node->ready_seq_ids.count(seq_id) != 0;
-    if (is_ready && node->seq_ids.size() <= 1)
+    if (retain && is_ready && node->seq_ids.size() <= 1)
         return false;
 
     node->seq_ids.erase(it);

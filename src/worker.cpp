@@ -51,8 +51,26 @@ int32_t InferenceWorker::generating_sequence_count() const {
     return generating_sequences_.load(std::memory_order_relaxed);
 }
 
-bool InferenceWorker::is_cancelled(const InferenceRequest& req) {
-    return req.cancelled && req.cancelled();
+bool InferenceWorker::is_cancelled(InferenceRequest& req) {
+    if (!req.cancelled || !req.cancelled())
+        return false;
+    if (req.on_cancel) {
+        req.on_cancel();
+        req.on_cancel = nullptr;
+    }
+    return true;
+}
+
+void InferenceWorker::record_cancelled_request() {
+    cancelled_requests_.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool InferenceWorker::is_idle() const {
+    return pending_count() == 0 && generating_sequences_.load(std::memory_order_relaxed) == 0;
+}
+
+bool InferenceWorker::is_running() const {
+    return running_.load(std::memory_order_relaxed);
 }
 
 // ── Phase 1: tokenise + KV-prepare every request ─────────────────────────────
