@@ -83,7 +83,7 @@ class RadixTree {
     // are always removed and freed.
     void register_seq_id(RadixNode* node, llama_seq_id seq_id, int32_t canonical_len);
     void mark_seq_id_ready(RadixNode* node, llama_seq_id seq_id);
-    bool release_seq_id(RadixNode* node, llama_seq_id seq_id);
+    bool release_seq_id(RadixNode* node, llama_seq_id seq_id, bool retain = true);
 
     // Move a ready sequence to the node representing its complete valid KV
     // token prefix. The caller retains its reference to the original node.

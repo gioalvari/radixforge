@@ -35,6 +35,7 @@ static bool check_admin_auth(const Config& config, const httplib::Request& req,
 
 void Server::start() {
     running_.store(true);
+    accepting_.store(true);
 
     // Heap-allocate the httplib server so stop_fn_ can safely capture it by
     // shared_ptr value. Calling stop() after listen() returns is idempotent.
@@ -43,6 +44,14 @@ void Server::start() {
     svr.set_keep_alive_max_count(100);
     svr.set_read_timeout(30);
     svr.set_write_timeout(120);
+    svr.set_payload_max_length(config_.max_body_bytes);
+    svr.set_error_handler([](const httplib::Request&, httplib::Response& res) {
+        if (res.status == static_cast<int>(httplib::StatusCode::PayloadTooLarge_413)) {
+            res.set_content(
+                openai_api::error_json("request body too large", "invalid_request_error"),
+                "application/json");
+        }
+    });
 
     // CORS preflight
     svr.Options(".*", [](const httplib::Request&, httplib::Response& res) {
@@ -54,6 +63,12 @@ void Server::start() {
 
     // Health check — includes model name and pool status
     svr.Get("/health", [this](const httplib::Request&, httplib::Response& res) {
+        if (!running_.load(std::memory_order_relaxed) ||
+            !accepting_.load(std::memory_order_relaxed) || !worker_.is_running()) {
+            res.status = 503;
+            res.set_content("{\"status\":\"draining\"}", "application/json");
+            return;
+        }
         size_t pending = worker_.pending_count();
         int32_t active_seqs = worker_.active_sequence_count();
         res.set_header("Access-Control-Allow-Origin", "*");
@@ -89,6 +104,10 @@ void Server::start() {
             "# TYPE radixforge_evictions_total counter\n"
             "radixforge_evictions_total " +
             std::to_string(metrics.evictions.load(std::memory_order_relaxed)) +
+            "\n"
+            "# TYPE radixforge_cancelled_requests_total counter\n"
+            "radixforge_cancelled_requests_total " +
+            std::to_string(worker_.cancelled_requests()) +
             "\n"
             "# TYPE radixforge_active_sequences gauge\n"
             "radixforge_active_sequences " +
@@ -145,6 +164,12 @@ void Server::start() {
     // Chat completions (non-streaming)
     auto handle_completion = [this](bool is_chat, const httplib::Request& req_http,
                                     httplib::Response& res) {
+        if (!accepting_.load(std::memory_order_relaxed)) {
+            res.status = 503;
+            res.set_content(openai_api::error_json("server is draining", "server_error"),
+                            "application/json");
+            return;
+        }
         InferenceRequest req;
         try {
             openai_api::parse_request_body(req_http.body, req, config_);
@@ -252,6 +277,7 @@ void Server::start() {
                             req.cancelled = [state] {
                                 return state->cancelled.load(std::memory_order_relaxed);
                             };
+                            req.on_cancel = [this] { worker_.record_cancelled_request(); };
                             state->enqueued = true;
                             enqueue_request = true;
                         }
@@ -313,7 +339,11 @@ void Server::start() {
                     state->cv.notify_one();
                 }
             };
-            req.cancelled = [state] { return state->cancelled.load(std::memory_order_relaxed); };
+            req.cancelled = [state, &req_http] {
+                return state->cancelled.load(std::memory_order_relaxed) ||
+                       req_http.is_connection_closed();
+            };
+            req.on_cancel = [this] { worker_.record_cancelled_request(); };
             req.on_error = [state](const std::string& message, int status) {
                 if (state->cancelled.load(std::memory_order_relaxed))
                     return;
@@ -378,6 +408,14 @@ void Server::stop() {
     if (stop_fn_)
         stop_fn_();
     running_.store(false);
+}
+
+void Server::begin_drain() {
+    accepting_.store(false);
+}
+
+bool Server::is_accepting() const {
+    return accepting_.load(std::memory_order_relaxed);
 }
 
 } // namespace radixforge

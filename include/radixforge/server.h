@@ -51,6 +51,7 @@ struct InferenceRequest {
     // Returns true once the HTTP peer has disconnected or a synchronous request
     // has timed out. The worker polls it before admission and each decode step.
     std::function<bool()> cancelled;
+    std::function<void()> on_cancel;
     std::chrono::steady_clock::time_point admitted_at;
 };
 
@@ -95,6 +96,7 @@ class InferenceWorker {
     size_t pending_count() const;
     int32_t active_sequence_count() const;
     int32_t generating_sequence_count() const;
+    void record_cancelled_request();
 
   private:
     LlamaBridge& bridge_;
@@ -111,6 +113,8 @@ class InferenceWorker {
     std::atomic<uint64_t> decode_steps_{0};
     std::atomic<uint64_t> prefill_tokens_{0};
     std::atomic<uint64_t> prefill_calls_{0};
+    std::atomic<uint64_t> cancelled_requests_{0};
+    std::atomic<int32_t> in_flight_requests_{0};
 
     void run();
     // Step 1: tokenise + KV-prepare every request, build PrefillCtx list.
@@ -124,7 +128,7 @@ class InferenceWorker {
     void fused_step(std::vector<ActiveSeq>& seqs, std::vector<PrefillCtx>& prefilling,
                     size_t newly_admitted);
     void retire(ActiveSeq& seq, bool notify_client);
-    static bool is_cancelled(const InferenceRequest& req);
+    bool is_cancelled(InferenceRequest& req);
 
   public:
     uint64_t decode_steps() const {
@@ -136,6 +140,11 @@ class InferenceWorker {
     uint64_t prefill_calls() const {
         return prefill_calls_.load(std::memory_order_relaxed);
     }
+    uint64_t cancelled_requests() const {
+        return cancelled_requests_.load(std::memory_order_relaxed);
+    }
+    bool is_idle() const;
+    bool is_running() const;
 };
 
 // HTTP server using cpp-httplib (OpenAI-compatible /v1/chat/completions).
@@ -145,6 +154,8 @@ class Server {
 
     void start(); // blocking
     void stop();  // thread-safe; interrupts start() from another thread
+    void begin_drain();
+    bool is_accepting() const;
 
   private:
     Config config_;
@@ -152,6 +163,7 @@ class Server {
     KVMapper& mapper_;
     RadixTree& tree_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> accepting_{true};
     std::function<void()> stop_fn_; // set by start(), called by stop()
 };
 

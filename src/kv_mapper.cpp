@@ -38,7 +38,7 @@ KVMapper::PrepareResult KVMapper::prepare_sequence(const std::vector<llama_token
         // Look up the source after allocation/eviction, so an id returned here
         // cannot have been evicted by allocate_seq_id().
         int32_t source_len = 0;
-        llama_seq_id src_seq = match.matched_tokens > 0
+        llama_seq_id src_seq = config_.prefix_cache_enabled && match.matched_tokens > 0
                                    ? tree_.find_covering_seq_id(match.cache_node, &source_len)
                                    : -1;
         cached_pos = src_seq != -1 ? std::min(match.matched_tokens, source_len) : 0;
@@ -107,6 +107,8 @@ void KVMapper::set_sequence_cell_count(llama_seq_id seq_id, int32_t cell_count) 
 RadixNode* KVMapper::extend_sequence(llama_seq_id seq_id, RadixNode* node,
                                      const std::vector<llama_token>& tokens) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (!config_.prefix_cache_enabled)
+        return node;
     RadixNode* extended =
         tree_.extend_seq_id(node, seq_id, tokens, static_cast<int32_t>(tokens.size()));
     if (seq_cell_counts_.count(seq_id) != 0) {
@@ -123,7 +125,7 @@ PrefixAvailability KVMapper::inspect_prefix(const std::vector<llama_token>& prom
 void KVMapper::release_sequence(llama_seq_id seq_id, RadixNode* node) {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    bool should_free = tree_.release_seq_id(node, seq_id);
+    bool should_free = tree_.release_seq_id(node, seq_id, config_.prefix_cache_enabled);
     if (should_free) {
         kv_ops_.seq_rm(seq_id, 0, -1);
         free_seq_ids_.push_back(seq_id);
