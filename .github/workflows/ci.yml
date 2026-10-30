@@ -78,7 +78,7 @@ jobs:
 
       - name: Check C++ formatting
         run: >-
-          find src include test tools -type f \( -name '*.cpp' -o -name '*.h' \) -print0 |
+          find src include test tools fuzz -type f \( -name '*.cpp' -o -name '*.h' \) -print0 |
           xargs -0 uvx clang-format==18.1.8 --dry-run --Werror
 
       - name: Check Python lint and formatting
@@ -110,3 +110,104 @@ jobs:
 
       - name: Run deterministic cache test
         run: ctest --test-dir build-e2e --output-on-failure -R '^e2e_determinism$'
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure fuzzers with Clang
+        env:
+          CC: clang
+          CXX: clang++
+        run: >-
+          cmake -B build-fuzz -DCMAKE_BUILD_TYPE=Debug
+          -DRADIXFORGE_UNIT_TESTS_ONLY=ON -DRADIXFORGE_BUILD_TOOLS=OFF
+          -DRADIXFORGE_FUZZ=ON -DRADIXFORGE_WERROR=ON
+
+      - name: Build fuzzers
+        run: cmake --build build-fuzz --target fuzz_json fuzz_openai_request -j 2
+
+      - name: Fuzz JSON parser
+        run: build-fuzz/fuzz/fuzz_json fuzz/corpus -max_total_time=60
+
+      - name: Fuzz OpenAI request parser
+        run: build-fuzz/fuzz/fuzz_openai_request fuzz/corpus -max_total_time=60
+
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure coverage build with Clang
+        env:
+          CC: clang
+          CXX: clang++
+        run: >-
+          cmake -B build-coverage -DCMAKE_BUILD_TYPE=Debug
+          -DRADIXFORGE_UNIT_TESTS_ONLY=ON -DRADIXFORGE_BUILD_TOOLS=OFF
+          -DRADIXFORGE_COVERAGE=ON -DRADIXFORGE_WERROR=ON
+
+      - name: Build and test coverage targets
+        env:
+          LLVM_PROFILE_FILE: coverage-%p.profraw
+        run: |
+          cmake --build build-coverage -j 2
+          ctest --test-dir build-coverage --output-on-failure
+
+      - name: Generate coverage summary and HTML report
+        run: |
+          find build-coverage -name '*.profraw' -print0 | xargs -0 llvm-profdata merge -sparse \
+            -o build-coverage/coverage.profdata
+          binaries=(build-coverage/test/test_radix_tree build-coverage/test/test_kv_mapper build-coverage/test/test_openai_api)
+          for binary in "${binaries[@]}"; do
+            llvm-cov report "$binary" -instr-profile=build-coverage/coverage.profdata \
+              --ignore-filename-regex='(vendor|test)/'
+          done | tee build-coverage/coverage.txt
+          llvm-cov show "${binaries[0]}" -instr-profile=build-coverage/coverage.profdata \
+            "${binaries[@]:1}" --format=html --output-dir=build-coverage/coverage-html \
+            --ignore-filename-regex='(vendor|test)/'
+          {
+            echo '## Unit-test coverage'
+            echo '```text'
+            cat build-coverage/coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Enforce per-file line coverage thresholds
+        run: |
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          thresholds = {
+              "src/radix_tree.cpp": 78.0,
+              "src/kv_mapper.cpp": 70.0,
+              "src/openai_api.cpp": 82.0,
+          }
+          report = Path("build-coverage/coverage.txt").read_text()
+          failures = []
+          for filename, threshold in thresholds.items():
+              match = re.search(
+                  rf"{re.escape(filename)}\s+\d+\s+\d+\s+[\d.]+%\s+\d+\s+\d+\s+[\d.]+%\s+\d+\s+\d+\s+([\d.]+)%",
+                  report,
+              )
+              if match is None:
+                  failures.append(f"missing coverage result for {filename}")
+              elif float(match.group(1)) < threshold:
+                  failures.append(
+                      f"{filename}: {match.group(1)}% below {threshold:.1f}% line threshold"
+                  )
+          if failures:
+              raise SystemExit("\n".join(failures))
+          PY
+
+      - name: Upload HTML coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: build-coverage/coverage-html
