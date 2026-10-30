@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   build-test:
-    runs-on: macos-14 # Apple Silicon (arm64)
+    runs-on: macos-15 # Apple Silicon (arm64)
     steps:
       - uses: actions/checkout@v4
         with:
@@ -20,7 +20,7 @@ jobs:
       - name: Configure compiler cache
         uses: hendrikmuhs/ccache-action@v1
         with:
-          key: macos-14-full
+          key: macos-15-full
 
       - name: Configure
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DRADIXFORGE_WERROR=ON
@@ -90,7 +90,7 @@ jobs:
 
   e2e-determinism:
     needs: build-test
-    runs-on: macos-14
+    runs-on: macos-15
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
