@@ -108,7 +108,7 @@ cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DRADIXFORGE_E2E_MODEL=/tmp/stori
 cmake --build build -j 5 && ctest --test-dir build --output-on-failure
 ```
 
-CI (GitHub Actions) runs the full macOS build and tests with ccache, Linux unit tests under ASan+UBSan and under TSan, a lint job (clang-format and ruff, not blocking yet), and the e2e determinism test on macOS (not blocking yet).
+CI (GitHub Actions) runs the full macOS build and tests with ccache, Linux unit tests under ASan+UBSan and under TSan, a lint job (clang-format 18 and ruff), and the e2e determinism test on macOS (not blocking yet).
 
 ## Server configuration
 

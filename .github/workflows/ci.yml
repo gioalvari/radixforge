@@ -71,17 +71,15 @@ jobs:
 
   lint:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install clang-format
-        run: sudo apt-get update && sudo apt-get install --yes clang-format
+      - uses: astral-sh/setup-uv@v6
 
       - name: Check C++ formatting
         run: >-
           find src include test tools -type f \( -name '*.cpp' -o -name '*.h' \) -print0 |
-          xargs -0 clang-format --dry-run --Werror
+          xargs -0 uvx clang-format==18.1.8 --dry-run --Werror
 
       - name: Check Python lint and formatting
         run: |
