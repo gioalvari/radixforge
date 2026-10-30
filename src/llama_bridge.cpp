@@ -118,6 +118,9 @@ std::string LlamaBridge::apply_chat_template(
 }
 
 llama_sampler* LlamaBridge::create_sampler(float temperature, float top_p) const {
+    if (temperature <= 0.0f) {
+        return llama_sampler_init_greedy();
+    }
     llama_sampler* s = llama_sampler_chain_init(llama_sampler_chain_default_params());
     llama_sampler_chain_add(s, llama_sampler_init_temp(temperature));
     llama_sampler_chain_add(s, llama_sampler_init_top_p(top_p, 1));
