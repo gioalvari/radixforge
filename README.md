@@ -31,6 +31,29 @@ curl http://127.0.0.1:8400/v1/chat/completions \
   }'
 ```
 
+### Install from a release
+
+Tagged releases publish prebuilt archives for Apple Silicon macOS (Metal) and x86_64 Linux (CPU) on the [Releases](https://github.com/gioalvari/radixforge/releases) page:
+
+```bash
+shasum -a 256 -c radixforge-<version>-<os>-<arch>.tar.gz.sha256
+tar -xzf radixforge-<version>-<os>-<arch>.tar.gz
+./radixforge-<version>-<os>-<arch>/radixforge -m path/to/model.gguf
+```
+
+### Docker
+
+A CPU-only image is published to GHCR for release tags. It listens on `0.0.0.0:8400`; mount GGUF models at `/models`:
+
+```bash
+docker run --rm -p 8400:8400 \
+  -v /path/to/models:/models:ro \
+  ghcr.io/gioalvari/radixforge:<version> \
+  -m /models/model.gguf -ngl 0
+```
+
+To build the image locally: `docker build -t radixforge .`
+
 ## Architecture
 
 ```mermaid
