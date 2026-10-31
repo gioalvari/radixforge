@@ -1,7 +1,8 @@
 #pragma once
 
+#include <cmath>
+#include <cstdint>
 #include <map>
-#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -115,7 +116,9 @@ class Parser {
             return parse_bool();
         if (c == 'n')
             return parse_null();
-        return parse_number();
+        if (c == '-' || (c >= '0' && c <= '9'))
+            return parse_number();
+        throw std::runtime_error("invalid JSON value");
     }
 
     JsonValue parse_string_value() {
@@ -125,76 +128,52 @@ class Parser {
     std::string parse_string() {
         expect('"');
         std::string result;
-        while (pos_ < src_.size() && src_[pos_] != '"') {
-            if (src_[pos_] == '\\') {
-                pos_++;
-                if (pos_ >= src_.size())
-                    break;
-                char esc = src_[pos_++];
-                switch (esc) {
-                case '"':
-                    result += '"';
-                    break;
-                case '\\':
-                    result += '\\';
-                    break;
-                case '/':
-                    result += '/';
-                    break;
-                case 'b':
-                    result += '\b';
-                    break;
-                case 'f':
-                    result += '\f';
-                    break;
-                case 'n':
-                    result += '\n';
-                    break;
-                case 'r':
-                    result += '\r';
-                    break;
-                case 't':
-                    result += '\t';
-                    break;
-                case 'u': {
-                    // Parse 4 hex digits
-                    if (pos_ + 4 > src_.size())
-                        break;
-                    uint32_t cp = 0;
-                    for (int i = 0; i < 4; i++) {
-                        cp <<= 4;
-                        char h = src_[pos_++];
-                        if (h >= '0' && h <= '9')
-                            cp |= (h - '0');
-                        else if (h >= 'a' && h <= 'f')
-                            cp |= (h - 'a' + 10);
-                        else if (h >= 'A' && h <= 'F')
-                            cp |= (h - 'A' + 10);
-                    }
-                    // Simple UTF-8 encode for BMP
-                    if (cp < 0x80) {
-                        result += (char)cp;
-                    } else if (cp < 0x800) {
-                        result += (char)(0xC0 | (cp >> 6));
-                        result += (char)(0x80 | (cp & 0x3F));
-                    } else {
-                        result += (char)(0xE0 | (cp >> 12));
-                        result += (char)(0x80 | ((cp >> 6) & 0x3F));
-                        result += (char)(0x80 | (cp & 0x3F));
-                    }
-                    break;
-                }
-                default:
-                    result += esc;
-                    break;
-                }
-            } else {
-                result += src_[pos_++];
+        while (pos_ < src_.size()) {
+            const unsigned char c = static_cast<unsigned char>(src_[pos_++]);
+            if (c == '"')
+                return result;
+            if (c < 0x20)
+                throw std::runtime_error("unescaped control character in JSON string");
+            if (c != '\\') {
+                result += static_cast<char>(c);
+                continue;
+            }
+
+            if (pos_ >= src_.size())
+                throw std::runtime_error("unterminated JSON escape sequence");
+            switch (src_[pos_++]) {
+            case '"':
+                result += '"';
+                break;
+            case '\\':
+                result += '\\';
+                break;
+            case '/':
+                result += '/';
+                break;
+            case 'b':
+                result += '\b';
+                break;
+            case 'f':
+                result += '\f';
+                break;
+            case 'n':
+                result += '\n';
+                break;
+            case 'r':
+                result += '\r';
+                break;
+            case 't':
+                result += '\t';
+                break;
+            case 'u':
+                append_unicode_escape(result);
+                break;
+            default:
+                throw std::runtime_error("invalid JSON escape sequence");
             }
         }
-        if (pos_ < src_.size())
-            pos_++; // skip closing quote
-        return result;
+        throw std::runtime_error("unterminated JSON string");
     }
 
     JsonValue parse_object(size_t depth) {
@@ -205,24 +184,27 @@ class Parser {
             pos_++;
             return JsonValue(std::move(obj));
         }
-        while (pos_ < src_.size()) {
+        while (true) {
             skip_ws();
+            if (pos_ >= src_.size() || src_[pos_] != '"')
+                throw std::runtime_error("expected JSON object key");
             std::string key = parse_string();
-            skip_ws();
             expect(':');
             JsonValue val = parse_value(depth);
             obj.emplace(std::move(key), std::move(val));
             skip_ws();
-            if (pos_ < src_.size() && src_[pos_] == ',') {
+            if (pos_ >= src_.size())
+                throw std::runtime_error("unterminated JSON object");
+            if (src_[pos_] == '}') {
+                ++pos_;
+                return JsonValue(std::move(obj));
+            }
+            if (src_[pos_] == ',') {
                 pos_++;
                 continue;
             }
-            break;
+            throw std::runtime_error("expected ',' or '}' in JSON object");
         }
-        skip_ws();
-        if (pos_ < src_.size() && src_[pos_] == '}')
-            pos_++;
-        return JsonValue(std::move(obj));
     }
 
     JsonValue parse_array(size_t depth) {
@@ -233,40 +215,62 @@ class Parser {
             pos_++;
             return JsonValue(std::move(arr));
         }
-        while (pos_ < src_.size()) {
+        while (true) {
             arr.push_back(parse_value(depth));
             skip_ws();
-            if (pos_ < src_.size() && src_[pos_] == ',') {
+            if (pos_ >= src_.size())
+                throw std::runtime_error("unterminated JSON array");
+            if (src_[pos_] == ']') {
+                ++pos_;
+                return JsonValue(std::move(arr));
+            }
+            if (src_[pos_] == ',') {
                 pos_++;
                 continue;
             }
-            break;
+            throw std::runtime_error("expected ',' or ']' in JSON array");
         }
-        skip_ws();
-        if (pos_ < src_.size() && src_[pos_] == ']')
-            pos_++;
-        return JsonValue(std::move(arr));
     }
 
     JsonValue parse_number() {
         size_t start = pos_;
         if (src_[pos_] == '-')
             pos_++;
-        while (pos_ < src_.size() && (src_[pos_] >= '0' && src_[pos_] <= '9'))
+        if (pos_ >= src_.size())
+            throw std::runtime_error("invalid JSON number");
+        if (src_[pos_] == '0') {
             pos_++;
+            if (pos_ < src_.size() && src_[pos_] >= '0' && src_[pos_] <= '9')
+                throw std::runtime_error("leading zero in JSON number");
+        } else if (src_[pos_] >= '1' && src_[pos_] <= '9') {
+            do {
+                pos_++;
+            } while (pos_ < src_.size() && src_[pos_] >= '0' && src_[pos_] <= '9');
+        } else {
+            throw std::runtime_error("invalid JSON number");
+        }
         if (pos_ < src_.size() && src_[pos_] == '.') {
             pos_++;
-            while (pos_ < src_.size() && (src_[pos_] >= '0' && src_[pos_] <= '9'))
+            const size_t fraction_start = pos_;
+            while (pos_ < src_.size() && src_[pos_] >= '0' && src_[pos_] <= '9')
                 pos_++;
+            if (pos_ == fraction_start)
+                throw std::runtime_error("invalid JSON number fraction");
         }
         if (pos_ < src_.size() && (src_[pos_] == 'e' || src_[pos_] == 'E')) {
             pos_++;
             if (pos_ < src_.size() && (src_[pos_] == '+' || src_[pos_] == '-'))
                 pos_++;
-            while (pos_ < src_.size() && (src_[pos_] >= '0' && src_[pos_] <= '9'))
+            const size_t exponent_start = pos_;
+            while (pos_ < src_.size() && src_[pos_] >= '0' && src_[pos_] <= '9')
                 pos_++;
+            if (pos_ == exponent_start)
+                throw std::runtime_error("invalid JSON number exponent");
         }
-        return JsonValue(std::stod(src_.substr(start, pos_ - start)));
+        const double value = std::stod(src_.substr(start, pos_ - start));
+        if (!std::isfinite(value))
+            throw std::runtime_error("non-finite JSON number");
+        return JsonValue(value);
     }
 
     JsonValue parse_bool() {
@@ -278,14 +282,15 @@ class Parser {
             pos_ += 5;
             return JsonValue(false);
         }
-        return JsonValue();
+        throw std::runtime_error("invalid JSON literal");
     }
 
     JsonValue parse_null() {
         if (src_.compare(pos_, 4, "null") == 0) {
             pos_ += 4;
+            return JsonValue();
         }
-        return JsonValue();
+        throw std::runtime_error("invalid JSON literal");
     }
 
     void skip_ws() {
@@ -296,8 +301,66 @@ class Parser {
 
     void expect(char c) {
         skip_ws();
-        if (pos_ < src_.size() && src_[pos_] == c)
-            pos_++;
+        if (pos_ >= src_.size() || src_[pos_] != c)
+            throw std::runtime_error("unexpected JSON token");
+        ++pos_;
+    }
+
+    static int hex_value(char c) {
+        if (c >= '0' && c <= '9')
+            return c - '0';
+        if (c >= 'a' && c <= 'f')
+            return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F')
+            return c - 'A' + 10;
+        return -1;
+    }
+
+    uint16_t parse_unicode_code_unit() {
+        if (pos_ + 4 > src_.size())
+            throw std::runtime_error("truncated JSON Unicode escape");
+        uint16_t code_unit = 0;
+        for (int index = 0; index < 4; ++index) {
+            const int value = hex_value(src_[pos_++]);
+            if (value < 0)
+                throw std::runtime_error("invalid JSON Unicode escape");
+            code_unit = static_cast<uint16_t>((code_unit << 4) | value);
+        }
+        return code_unit;
+    }
+
+    void append_unicode_escape(std::string& result) {
+        uint32_t code_point = parse_unicode_code_unit();
+        if (code_point >= 0xD800 && code_point <= 0xDBFF) {
+            if (pos_ + 2 > src_.size() || src_[pos_] != '\\' || src_[pos_ + 1] != 'u')
+                throw std::runtime_error("unpaired high surrogate in JSON string");
+            pos_ += 2;
+            const uint32_t low_surrogate = parse_unicode_code_unit();
+            if (low_surrogate < 0xDC00 || low_surrogate > 0xDFFF)
+                throw std::runtime_error("invalid low surrogate in JSON string");
+            code_point = 0x10000 + ((code_point - 0xD800) << 10) + (low_surrogate - 0xDC00);
+        } else if (code_point >= 0xDC00 && code_point <= 0xDFFF) {
+            throw std::runtime_error("unpaired low surrogate in JSON string");
+        }
+        append_utf8(result, code_point);
+    }
+
+    static void append_utf8(std::string& result, uint32_t code_point) {
+        if (code_point <= 0x7F) {
+            result += static_cast<char>(code_point);
+        } else if (code_point <= 0x7FF) {
+            result += static_cast<char>(0xC0 | (code_point >> 6));
+            result += static_cast<char>(0x80 | (code_point & 0x3F));
+        } else if (code_point <= 0xFFFF) {
+            result += static_cast<char>(0xE0 | (code_point >> 12));
+            result += static_cast<char>(0x80 | ((code_point >> 6) & 0x3F));
+            result += static_cast<char>(0x80 | (code_point & 0x3F));
+        } else {
+            result += static_cast<char>(0xF0 | (code_point >> 18));
+            result += static_cast<char>(0x80 | ((code_point >> 12) & 0x3F));
+            result += static_cast<char>(0x80 | ((code_point >> 6) & 0x3F));
+            result += static_cast<char>(0x80 | (code_point & 0x3F));
+        }
     }
 
     const std::string& src_;

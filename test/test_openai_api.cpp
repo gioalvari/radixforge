@@ -127,8 +127,37 @@ void test_response_and_error_shapes() {
 void test_utf8_boundary_helper() {
     std::printf("\n[test_utf8_boundary_helper]\n");
     const std::string complete = std::string("A") + "\xE2" + "\x82" + "\xAC";
+    const std::string incomplete_two = std::string("A") + "\xC2";
+    const std::string incomplete_three_one = std::string("A") + "\xE2";
+    const std::string incomplete_three_two = std::string("A") + "\xE2" + "\x82";
+    const std::string incomplete_four_one = std::string("A") + "\xF0";
+    const std::string incomplete_four_two = std::string("A") + "\xF0" + "\x9F";
+    const std::string incomplete_four_three = std::string("A") + "\xF0" + "\x9F" + "\x92";
+    const std::string invalid_lead = std::string("A") + "\xC0";
+    const std::string invalid_extended_lead = std::string("A") + "\xF8";
+    const std::string isolated_continuation = std::string("A") + "\x80";
     CHECK(radixforge::openai_api::complete_utf8_prefix_length(complete) == complete.size(),
           "keeps complete multi-byte UTF-8 suffix");
+    CHECK(radixforge::openai_api::complete_utf8_prefix_length(incomplete_two) == 1,
+          "buffers incomplete two-byte UTF-8 suffix");
+    CHECK(radixforge::openai_api::complete_utf8_prefix_length(incomplete_three_one) == 1,
+          "buffers one byte of incomplete three-byte UTF-8 suffix");
+    CHECK(radixforge::openai_api::complete_utf8_prefix_length(incomplete_three_two) == 1,
+          "buffers two bytes of incomplete three-byte UTF-8 suffix");
+    CHECK(radixforge::openai_api::complete_utf8_prefix_length(incomplete_four_one) == 1,
+          "buffers one byte of incomplete four-byte UTF-8 suffix");
+    CHECK(radixforge::openai_api::complete_utf8_prefix_length(incomplete_four_two) == 1,
+          "buffers two bytes of incomplete four-byte UTF-8 suffix");
+    CHECK(radixforge::openai_api::complete_utf8_prefix_length(incomplete_four_three) == 1,
+          "buffers three bytes of incomplete four-byte UTF-8 suffix");
+    CHECK(radixforge::openai_api::complete_utf8_prefix_length(invalid_lead) == invalid_lead.size(),
+          "flushes invalid UTF-8 lead byte");
+    CHECK(radixforge::openai_api::complete_utf8_prefix_length(invalid_extended_lead) ==
+              invalid_extended_lead.size(),
+          "flushes invalid extended UTF-8 lead byte");
+    CHECK(radixforge::openai_api::complete_utf8_prefix_length(isolated_continuation) ==
+              isolated_continuation.size(),
+          "flushes isolated UTF-8 continuation byte");
 }
 
 void test_json_parser_hardening() {
@@ -136,11 +165,46 @@ void test_json_parser_hardening() {
     const auto escaped = radixforge::json::parse(R"({"s":"\"\\\/\b\f\n\r\t","u":"\u20ac"})");
     CHECK(escaped["s"].as_string() == "\"\\/\b\f\n\r\t", "parses standard string escapes");
     CHECK(escaped["u"].as_string() == "\xE2\x82\xAC", "parses Unicode BMP escape as UTF-8");
+    const auto surrogate_pair = radixforge::json::parse(R"({"face":"\ud83d\ude00"})");
+    CHECK(surrogate_pair["face"].as_string() == "\xF0\x9F\x98\x80",
+          "decodes Unicode surrogate pair as UTF-8");
+    const auto nested =
+        radixforge::json::parse(R"({"outer":[{"escaped":"line\nquote\""}],"n":-1.25e+2})");
+    CHECK(nested["outer"][0]["escaped"].as_string() == "line\nquote\"",
+          "accepts nested JSON with escapes");
+    CHECK(nested["n"].as_number() == -125.0, "accepts JSON numbers with exponents");
 
     expect_throws([] { radixforge::json::parse("{} trailing"); }, "rejects trailing data");
-    for (const std::string& malformed : {"", "true false", "[1 2]"}) {
+    for (const std::string& malformed : {"",
+                                         "true false",
+                                         "[1 2]",
+                                         "{",
+                                         "[",
+                                         "{\"a\":1",
+                                         "[1,",
+                                         "{\"a\":1,}",
+                                         "{\"a\" 1}",
+                                         "{\"a\":1 \"b\":2}",
+                                         "\"unterminated",
+                                         "\"bad\\q\"",
+                                         "\"bad\\u12\"",
+                                         "\"bad\\u12xz\"",
+                                         "\"\\ud800\"",
+                                         "\"\\udc00\"",
+                                         "01",
+                                         "-",
+                                         "1.",
+                                         "1e",
+                                         "1e+",
+                                         "[,]",
+                                         "fal",
+                                         "nul"}) {
         expect_throws([&] { radixforge::json::parse(malformed); }, "rejects malformed JSON input");
     }
+
+    const std::string raw_control = std::string("\"") + '\x01' + "\"";
+    expect_throws([&] { radixforge::json::parse(raw_control); },
+                  "rejects raw control characters in JSON strings");
 
     std::string at_limit;
     std::string over_limit;

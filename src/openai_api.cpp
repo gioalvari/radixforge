@@ -119,19 +119,35 @@ std::string completion_json(const std::string& content, const InferenceStats& st
 size_t complete_utf8_prefix_length(const std::string& text) {
     if (text.empty())
         return 0;
-    size_t start = text.size();
-    while (start > 0 && (static_cast<unsigned char>(text[start - 1]) & 0xC0) == 0x80) {
-        --start;
+
+    size_t continuation_count = 0;
+    size_t suffix_start = text.size();
+    while (suffix_start > 0 && continuation_count < 3 &&
+           (static_cast<unsigned char>(text[suffix_start - 1]) & 0xC0) == 0x80) {
+        --suffix_start;
+        ++continuation_count;
     }
-    if (start == text.size())
+
+    if (continuation_count == 0) {
+        const unsigned char last = static_cast<unsigned char>(text.back());
+        const size_t expected = last >= 0xF0 && last <= 0xF4   ? 4
+                                : last >= 0xE0 && last <= 0xEF ? 3
+                                : last >= 0xC2 && last <= 0xDF ? 2
+                                                               : 1;
+        return expected > 1 ? text.size() - 1 : text.size();
+    }
+
+    if (suffix_start == 0)
         return text.size();
 
-    const unsigned char lead = static_cast<unsigned char>(text[start]);
+    const size_t lead_position = suffix_start - 1;
+    const unsigned char lead = static_cast<unsigned char>(text[lead_position]);
     const size_t expected = lead >= 0xF0 && lead <= 0xF4   ? 4
                             : lead >= 0xE0 && lead <= 0xEF ? 3
                             : lead >= 0xC2 && lead <= 0xDF ? 2
                                                            : 1;
-    return text.size() - start < expected ? start : text.size();
+    const size_t available = continuation_count + 1;
+    return expected > available ? lead_position : text.size();
 }
 
 } // namespace radixforge::openai_api
