@@ -1,0 +1,142 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Package version (for example, v0.1.0)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-package:
+    name: ${{ matrix.os }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            os: macos
+            arch: arm64
+            cmake_args: -DRADIXFORGE_METAL=ON -DGGML_NATIVE=ON
+          - runner: ubuntu-latest
+            os: linux
+            arch: x86_64
+            cmake_args: -DRADIXFORGE_METAL=OFF -DGGML_NATIVE=OFF
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure compiler cache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: release-${{ matrix.os }}-${{ matrix.arch }}
+
+      - name: Configure
+        run: >-
+          cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_SHARED_LIBS=OFF -DRADIXFORGE_WERROR=ON
+          -DRADIXFORGE_BUILD_TOOLS=OFF
+          ${{ matrix.cmake_args }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Verify macOS binary uses only system libraries and frameworks
+        if: runner.os == 'macOS'
+        run: |
+          set -eu
+          otool -L build/radixforge
+          dependencies="$(otool -L build/radixforge | tail -n +2 | awk '{print $1}')"
+          if printf '%s\n' "$dependencies" | grep -Eqv '^/usr/lib/|^/System/Library/'; then
+            echo "radixforge links a non-system dependency" >&2
+            exit 1
+          fi
+
+      - name: Package release archive
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          OS: ${{ matrix.os }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -eu
+          package="radixforge-${TAG}-${OS}-${ARCH}"
+          mkdir -p "dist/${package}"
+          cp build/radixforge LICENSE README.md "dist/${package}/"
+          tar -C dist -czf "dist/${package}.tar.gz" "${package}"
+          shasum -a 256 "dist/${package}.tar.gz" > "dist/${package}.tar.gz.sha256"
+
+      - name: Upload release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}-${{ matrix.arch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    needs: build-test-package
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download release archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release-artifacts
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: release-artifacts/*
+
+  docker:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/gioalvari/radixforge
+          tags: type=ref,event=tag
+
+      - name: Build and publish container image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
