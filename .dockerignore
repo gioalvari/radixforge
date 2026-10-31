@@ -1,0 +1,9 @@
+# Exclude Git metadata, including the gitdir pointer in the llama.cpp submodule.
+# The submodule's source files remain in the build context.
+.git
+**/.git
+.cache
+**/.cache
+build
+build*/
+*.tar.gz
