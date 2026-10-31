@@ -78,12 +78,13 @@ void test_completion_defaults_and_stream() {
 void test_max_tokens_validation() {
     std::printf("\n[test_max_tokens_validation]\n");
     const radixforge::Config config = default_config();
-    for (const std::string& value : {"-1", "1.5", "2147483648", "1e9999", "true", "null"}) {
+    for (const char* value : {"-1", "1.5", "2147483648", "1e9999", "true", "null"}) {
         expect_throws(
             [&] {
                 radixforge::InferenceRequest request;
                 radixforge::openai_api::parse_request_body(
-                    "{\"prompt\":\"x\",\"max_tokens\":" + value + "}", request, config);
+                    std::string("{\"prompt\":\"x\",\"max_tokens\":") + value + "}", request,
+                    config);
             },
             "rejects invalid max_tokens value");
     }
@@ -175,30 +176,30 @@ void test_json_parser_hardening() {
     CHECK(nested["n"].as_number() == -125.0, "accepts JSON numbers with exponents");
 
     expect_throws([] { radixforge::json::parse("{} trailing"); }, "rejects trailing data");
-    for (const std::string& malformed : {"",
-                                         "true false",
-                                         "[1 2]",
-                                         "{",
-                                         "[",
-                                         "{\"a\":1",
-                                         "[1,",
-                                         "{\"a\":1,}",
-                                         "{\"a\" 1}",
-                                         "{\"a\":1 \"b\":2}",
-                                         "\"unterminated",
-                                         "\"bad\\q\"",
-                                         "\"bad\\u12\"",
-                                         "\"bad\\u12xz\"",
-                                         "\"\\ud800\"",
-                                         "\"\\udc00\"",
-                                         "01",
-                                         "-",
-                                         "1.",
-                                         "1e",
-                                         "1e+",
-                                         "[,]",
-                                         "fal",
-                                         "nul"}) {
+    for (const char* malformed : {"",
+                                  "true false",
+                                  "[1 2]",
+                                  "{",
+                                  "[",
+                                  "{\"a\":1",
+                                  "[1,",
+                                  "{\"a\":1,}",
+                                  "{\"a\" 1}",
+                                  "{\"a\":1 \"b\":2}",
+                                  "\"unterminated",
+                                  "\"bad\\q\"",
+                                  "\"bad\\u12\"",
+                                  "\"bad\\u12xz\"",
+                                  "\"\\ud800\"",
+                                  "\"\\udc00\"",
+                                  "01",
+                                  "-",
+                                  "1.",
+                                  "1e",
+                                  "1e+",
+                                  "[,]",
+                                  "fal",
+                                  "nul"}) {
         expect_throws([&] { radixforge::json::parse(malformed); }, "rejects malformed JSON input");
     }
 

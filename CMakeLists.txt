@@ -148,8 +148,18 @@ if(RADIXFORGE_FUZZ)
     if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         message(FATAL_ERROR "RADIXFORGE_FUZZ requires a Clang compiler")
     endif()
-    include(CheckCXXCompilerFlag)
-    check_cxx_compiler_flag("-fsanitize=fuzzer" RADIXFORGE_HAS_LIBFUZZER)
+    # check_cxx_compiler_flag does not pass the flag to the linker and its test
+    # program defines main(), so probe libFuzzer with a real fuzz entry point.
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "-fsanitize=fuzzer")
+    set(CMAKE_REQUIRED_LINK_OPTIONS "-fsanitize=fuzzer")
+    check_cxx_source_compiles([=[
+#include <cstddef>
+#include <cstdint>
+extern "C" int LLVMFuzzerTestOneInput(const uint8_t*, size_t) { return 0; }
+]=] RADIXFORGE_HAS_LIBFUZZER)
+    unset(CMAKE_REQUIRED_FLAGS)
+    unset(CMAKE_REQUIRED_LINK_OPTIONS)
     if(NOT RADIXFORGE_HAS_LIBFUZZER)
         message(FATAL_ERROR
             "RADIXFORGE_FUZZ requires libFuzzer support (-fsanitize=fuzzer); use upstream Clang")

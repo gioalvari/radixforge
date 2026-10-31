@@ -118,6 +118,12 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Put the matching LLVM tools on PATH
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libclang-rt-18-dev
+          dirname "$(readlink -f "$(command -v clang)")" >> "$GITHUB_PATH"
+
       - name: Configure fuzzers with Clang
         env:
           CC: clang
@@ -142,6 +148,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Put the matching LLVM tools on PATH
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libclang-rt-18-dev
+          dirname "$(readlink -f "$(command -v clang)")" >> "$GITHUB_PATH"
 
       - name: Configure coverage build with Clang
         env:
