@@ -78,7 +78,9 @@ CMake options:
 | `RADIXFORGE_UNIT_TESTS_ONLY` | `OFF` | Build only the unit tests, without compiling llama.cpp or the server. |
 | `RADIXFORGE_WERROR` | `OFF` | Treat project warnings (`-Wall -Wextra -Wpedantic`) as errors. CI enables it. |
 | `RADIXFORGE_SANITIZE` | empty | Sanitizers for project targets: `address,undefined` or `thread`. |
-| `RADIXFORGE_E2E_MODEL` | empty | Path to a GGUF model; when set, registers the end-to-end determinism test. |
+| `RADIXFORGE_E2E_MODEL` | empty | Path to a GGUF model; when set, registers the end-to-end determinism and robustness tests. |
+| `RADIXFORGE_FUZZ` | `OFF` | Build libFuzzer targets in `fuzz/` (requires a clang with `-fsanitize=fuzzer`; Apple clang does not ship it). |
+| `RADIXFORGE_COVERAGE` | `OFF` | Instrument project targets for coverage (clang source-based or gcc `--coverage`). |
 
 ```bash
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
@@ -90,7 +92,10 @@ Tests:
 
 - `test_radix_tree`: radix-tree unit tests, including the ancestor-cap and leaf-pruning regressions and a concurrency stress test.
 - `test_kv_mapper`: `KVMapper` lifecycle tests against a fake `KvOps`, with no model needed (sequence-ID accounting, full-hit delta, trimming, multi-turn extension).
+- `test_openai_api`: request parsing, `max_tokens` validation, error envelopes, response shapes, SSE formatting, UTF-8 chunk boundaries, and strict JSON parsing.
+- `test_fuzz_json_replay`, `test_fuzz_openai_request_replay`: replay the seed corpus in `fuzz/corpus/` through the fuzz targets, so every compiler exercises them.
 - `e2e_determinism`: starts the server and checks that temperature-0 output for a prompt is the same cold, after sibling prompts, on a repeat, and after eviction.
+- `e2e_robustness`: `/health`, 413 on oversized bodies, cancellation on client disconnect, `--no-prefix-cache`, and graceful exit on SIGTERM.
 
 Fast unit-test loop with sanitizers (no llama.cpp build):
 
@@ -108,7 +113,7 @@ cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DRADIXFORGE_E2E_MODEL=/tmp/stori
 cmake --build build -j 5 && ctest --test-dir build --output-on-failure
 ```
 
-CI (GitHub Actions) runs the full macOS build and tests with ccache, Linux unit tests under ASan+UBSan and under TSan, a lint job (clang-format 18 and ruff), and the e2e determinism test on macOS against a tiny GGUF model. All jobs are blocking.
+CI (GitHub Actions) runs the full macOS build and tests with ccache, Linux unit tests under ASan+UBSan and under TSan, a lint job (clang-format 18 and ruff), libFuzzer runs of 60 seconds per target, a coverage job with per-file line-coverage thresholds for the cache and API code, and the end-to-end tests on macOS against a tiny GGUF model. All jobs are blocking.
 
 ## Server configuration
 
@@ -124,6 +129,9 @@ CI (GitHub Actions) runs the full macOS build and tests with ccache, Linux unit 
 | `--admit-window-ms <n>` | `2` | Idle coalescing window for request bursts; `0` disables the wait. |
 | `--request-timeout <seconds>` | `300` | Non-streaming response timeout; values are clamped to at least one second. |
 | `--kv-high-watermark <0..1>` | `0.9` | Before preparation, LRU-evict idle retained sequences while mapper-tracked KV cells exceed this fraction of `--ctx-size`. Values must be greater than `0` and at most `1`. |
+| `--shutdown-timeout <seconds>` | `10` | On SIGINT/SIGTERM, stop accepting requests and wait up to this long for in-flight requests; `0` exits immediately. |
+| `--max-body-bytes <n>` | `8388608` | Maximum request body size; larger bodies return 413. |
+| `--no-prefix-cache` | off | Disable prefix reuse and retention so every request is cold (useful for A/B measurements). |
 | `--admin-token <token>` | unset | Optional Bearer token required for `/admin/*`. |
 | `--log-level <level>` | `info` | `debug`, `info`, `warn`, or `error`. |
 
@@ -133,7 +141,7 @@ The server accepts JSON at these endpoints:
 
 | Endpoint | Behavior |
 | --- | --- |
-| `GET /health` | Returns server status, model basename, active/pending counts, and cache-hit rate. |
+| `GET /health` | Returns 200 with server status, model basename, active/pending counts, and cache-hit rate; returns 503 `{"status":"draining"}` during shutdown. |
 | `GET /metrics` | Returns Prometheus text-format counters and gauges. |
 | `GET /admin/stats` | Returns worker and cache counters; requires `Authorization: Bearer <token>` when `--admin-token` is set. |
 | `GET /admin/tree/dump` | Returns radix-tree diagnostics; same optional admin authorization. |
@@ -155,7 +163,7 @@ radixforge_cache_hit_tokens_total 768
 radixforge_kv_cells_used 1024
 ```
 
-The complete metric set is `radixforge_requests_total`, `radixforge_cache_hit_tokens_total`, `radixforge_prompt_tokens_total`, `radixforge_evictions_total`, `radixforge_active_sequences`, `radixforge_retained_sequences`, `radixforge_kv_cells_used`, and `radixforge_tree_nodes`. `radixforge_kv_cells_used` is mapper-tracked per-sequence valid-KV accounting, not a direct occupancy reading from llama.cpp.
+The complete metric set is `radixforge_requests_total`, `radixforge_cache_hit_tokens_total`, `radixforge_prompt_tokens_total`, `radixforge_evictions_total`, `radixforge_cancelled_requests_total`, `radixforge_active_sequences`, `radixforge_retained_sequences`, `radixforge_kv_cells_used`, and `radixforge_tree_nodes`. `radixforge_kv_cells_used` is mapper-tracked per-sequence valid-KV accounting, not a direct occupancy reading from llama.cpp.
 
 ### Multi-turn reuse
 
@@ -164,7 +172,9 @@ Successful decoded output extends the reusable radix prefix. In a deterministic 
 ### Validation and errors
 
 - `max_tokens` must be a finite, non-negative integer representable as `int32_t`; malformed values return HTTP 400.
-- The minimal JSON parser rejects nesting deeper than 64 levels and rejects trailing non-whitespace input.
+- The minimal JSON parser is strict: it rejects unterminated strings and containers, missing separators, trailing commas, control characters inside strings, malformed numbers and escapes (surrogate pairs are decoded, unpaired surrogates rejected), nesting deeper than 64 levels, and trailing non-whitespace input.
+- Bodies larger than `--max-body-bytes` return 413 with the error envelope.
+- If a client disconnects, its request is cancelled and its sequence released; the `radixforge_cancelled_requests_total` metric counts these.
 - Non-streaming errors use an OpenAI-style envelope:
 
   ```json
@@ -173,14 +183,14 @@ Successful decoded output extends the reusable radix prefix. In a deterministic 
 
   Invalid requests return 400, exhausted KV capacity returns 503, internal inference failures return 500, and a non-streaming timeout returns 504.
 - Streaming requests send `text/event-stream`. If an error happens after headers are sent, the server emits `data: {"error": ...}` followed by `data: [DONE]`. Normal streams end with a final choice containing `finish_reason: "stop"` and then `[DONE]`.
-- Streaming buffers an incomplete trailing UTF-8 sequence so a multi-byte code point is not split across SSE content chunks.
+- Streaming buffers an incomplete trailing UTF-8 sequence so a multi-byte code point is not split across SSE content chunks; invalid bytes are flushed rather than held back.
 
 ## Limitations
 
 - The project is tested on macOS with the llama.cpp Metal path; other platforms/backends are not validated here.
 - It serves one model per process and has one inference worker. Run separate processes for separate models.
 - The API is intentionally small: it does not implement authentication for `/v1/*`, tools/function calling, embeddings, logprobs, grammar controls, or the complete OpenAI API surface.
-- Output quality, memory use, and throughput depend on the selected GGUF model and llama.cpp version. A current, single-machine shared-prefix measurement is documented in [docs/benchmark.md](docs/benchmark.md); it is not a general performance claim.
+- Output quality, memory use, and throughput depend on the selected GGUF model and llama.cpp version. Current shared-prefix measurements compare RadixForge cache-on/off against the vendored llama-server on one Metal machine with a 0.5B Q4 model; llama-server remains faster end to end. See [docs/benchmark.md](docs/benchmark.md) for methodology, ranges, and caveats; it is not a general performance claim.
 - KV high-watermark accounting is maintained by `KVMapper` from valid cells assigned to each sequence; it is not a direct llama.cpp memory-occupancy measurement. Active or referenced sequences cannot be evicted to satisfy the watermark.
 - The parser is deliberately minimal and intended only for the supported request schema.
 
