@@ -140,6 +140,8 @@ def start(
             "--request-timeout",
             "120",
         ]
+        if args.debug_metrics:
+            command.append("--debug-metrics")
         if not cache_enabled:
             command.append("--no-prefix-cache")
     else:
@@ -214,7 +216,7 @@ def phase(
         else:
             cache_hits = sum(value[2] for value in values)
             prompt_tokens = cache_hits + sum(value[3] for value in values)
-        return {
+        result: dict[str, float | int] = {
             "ttft_p50_ms": percentile(ttft, 0.5),
             "ttft_p95_ms": percentile(ttft, 0.95),
             "e2e_p50_ms": percentile(e2e, 0.5),
@@ -222,6 +224,28 @@ def phase(
             "throughput_req_s": len(values) / wall,
             "cache_hit_ratio": cache_hits / prompt_tokens if prompt_tokens else 0.0,
         }
+        if kind == "radixforge":
+            for name in (
+                "queue_wait_microseconds_total",
+                "queue_wait_requests_total",
+                "cache_lookup_microseconds_total",
+                "cache_lookup_calls_total",
+                "cache_insert_microseconds_total",
+                "cache_insert_calls_total",
+                "prefill_decode_microseconds_total",
+                "prefill_decode_tokens_total",
+                "generation_decode_microseconds_total",
+                "generation_decode_tokens_total",
+                "sampler_microseconds_total",
+                "sampler_calls_total",
+                "callback_microseconds_total",
+                "callback_calls_total",
+                "sse_write_microseconds_total",
+                "sse_writes_total",
+            ):
+                key = f"radixforge_{name}"
+                result[name] = after[key] - before[key]
+        return result
     finally:
         process.terminate()
         try:
@@ -240,16 +264,20 @@ def main() -> None:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--port", type=int, default=18500)
     parser.add_argument("--repetitions", type=int, default=3)
+    parser.add_argument("--radixforge-only", action="store_true")
+    parser.add_argument("--concurrency", type=int, action="append", choices=(1, 4))
+    parser.add_argument("--cache-enabled-only", action="store_true")
+    parser.add_argument("--debug-metrics", action="store_true")
     args = parser.parse_args()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     report: dict[str, Any] = {}
-    for concurrency in (1, 4):
-        for kind, enabled in (
-            ("radixforge", False),
-            ("radixforge", True),
-            ("llama", False),
-            ("llama", True),
-        ):
+    conditions = (("radixforge", False), ("radixforge", True))
+    if args.cache_enabled_only:
+        conditions = (("radixforge", True),)
+    if not args.radixforge_only:
+        conditions += (("llama", False), ("llama", True))
+    for concurrency in args.concurrency or (1, 4):
+        for kind, enabled in conditions:
             name = f"{kind}_{'cache_on' if enabled else 'cache_off'}_c{concurrency}"
             report[name] = [
                 phase(args, kind, enabled, concurrency, repetition)
