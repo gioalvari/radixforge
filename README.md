@@ -136,7 +136,7 @@ cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DRADIXFORGE_E2E_MODEL=/tmp/stori
 cmake --build build -j 5 && ctest --test-dir build --output-on-failure
 ```
 
-CI (GitHub Actions) runs the full macOS build and tests with ccache, Linux unit tests under ASan+UBSan and under TSan, a lint job (clang-format 18 and ruff), libFuzzer runs of 60 seconds per target, a coverage job with per-file line-coverage thresholds for the cache and API code, and the end-to-end tests on macOS against a tiny GGUF model. All jobs are blocking.
+CI (GitHub Actions) runs the full macOS build and tests with ccache, macOS and Linux CPU end-to-end determinism and robustness checks against a cached tiny GGUF model, Linux unit tests under ASan+UBSan and under TSan, a lint job (clang-format 18 and ruff), libFuzzer runs of 60 seconds per target, and a coverage job with per-file line-coverage thresholds for the cache and API code. All jobs are blocking.
 
 ## Server configuration
 

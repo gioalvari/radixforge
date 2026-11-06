@@ -94,22 +94,75 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Cache tiny GGUF model
+        id: tiny-model-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/radixforge/models/stories260K.gguf
+          key: e2e-model-stories260K-v1
+
       - name: Download tiny GGUF model
+        if: steps.tiny-model-cache.outputs.cache-hit != 'true'
         run: >-
+          mkdir -p ~/.cache/radixforge/models &&
           curl --fail --location --retry 3 --retry-all-errors
-          --output /tmp/stories260K.gguf
+          --output ~/.cache/radixforge/models/stories260K.gguf
           https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories260K.gguf
 
       - name: Configure
         run: >-
           cmake -B build-e2e -DCMAKE_BUILD_TYPE=Release -DRADIXFORGE_WERROR=ON
-          -DRADIXFORGE_E2E_MODEL=/tmp/stories260K.gguf
+          -DRADIXFORGE_E2E_MODEL="$HOME/.cache/radixforge/models/stories260K.gguf"
 
       - name: Build server
         run: cmake --build build-e2e --target radixforge -j "$(sysctl -n hw.ncpu)"
 
-      - name: Run deterministic cache test
-        run: ctest --test-dir build-e2e --output-on-failure -R '^e2e_determinism$'
+      - name: Run end-to-end tests
+        run: >-
+          ctest --test-dir build-e2e --output-on-failure
+          -R '^(e2e_determinism|e2e_robustness)$'
+
+  e2e-linux-cpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure compiler cache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: linux-e2e-cpu
+
+      - name: Cache tiny GGUF model
+        id: tiny-model-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/radixforge/models/stories260K.gguf
+          key: e2e-model-stories260K-v1
+
+      - name: Download tiny GGUF model
+        if: steps.tiny-model-cache.outputs.cache-hit != 'true'
+        run: >-
+          mkdir -p ~/.cache/radixforge/models &&
+          curl --fail --location --retry 3 --retry-all-errors
+          --output ~/.cache/radixforge/models/stories260K.gguf
+          https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories260K.gguf
+
+      - name: Configure
+        run: >-
+          cmake -B build-e2e -S . -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_SHARED_LIBS=OFF -DRADIXFORGE_WERROR=ON
+          -DRADIXFORGE_BUILD_TOOLS=OFF -DRADIXFORGE_METAL=OFF -DGGML_NATIVE=OFF
+          -DRADIXFORGE_E2E_MODEL="$HOME/.cache/radixforge/models/stories260K.gguf"
+
+      - name: Build
+        run: cmake --build build-e2e -j "$(nproc)"
+
+      - name: Run end-to-end tests
+        run: >-
+          ctest --test-dir build-e2e --output-on-failure
+          -R '^(e2e_determinism|e2e_robustness)$'
 
   fuzz:
     runs-on: ubuntu-latest
