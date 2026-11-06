@@ -31,6 +31,17 @@ Each cell is the median of three fresh-process repetitions. The bracket is the m
 
 Cache-hit ratio is cache-hit tokens divided by cache-hit plus newly evaluated prompt tokens. For RadixForge it comes from the delta of `/metrics` counters. For llama-server it is aggregated from terminal streaming `timings.cache_n` and `timings.prompt_n` fields. The two counters are comparable as an indication of prompt work avoided, but not guaranteed to have identical internal definitions.
 
+## Component timing snapshot
+
+**Run date:** 2026-11-06. One fresh RadixForge cache-enabled run at each concurrency after one excluded warm-up request; 24 streaming requests per run, with `--debug-metrics`. Values are `/metrics` counter deltas. Decode time is apportioned between fused prefill and generation tokens by their share of each fused `llama_decode` batch.
+
+| Concurrency | Queue wait (ms/req) | Cache lookup / insert (ms/call) | Prefill decode (ms/token) | Generation decode (ms/token) | Sampler (ms/token) | Callback (ms/call) | SSE write (ms/write) |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.005 | 0.001 / 0.014 | 0.114 | 0.628 | 3.606 | 0.088 | 0.047 |
+| 4 | 9.145 | 0.001 / 0.015 | 0.058 | 0.178 | 1.826 | 0.089 | 0.027 |
+
+At c=1, the 360 generated tokens accumulated 226.2 ms in fused decode and 1,384.7 ms in sampling. At c=4, they accumulated 64.2 ms and 701.4 ms respectively. The 219.5 ms total queue wait at c=4 reflects intentional concurrent request arrival and batching, rather than a per-token cost. These counters are opt-in: without `--debug-metrics`, RadixForge does not allocate the counter set or read timing clocks on these paths.
+
 ## Performance fixes
 
 The earlier cache-on concurrency-1 result for RadixForge was 16.8 ms TTFT, 126.2 ms E2E p50, and 7.79 req/s; the post-first-token portion was much slower than llama-server despite similar TTFT. A three-second `sample` capture during a long streaming request showed `llama_sampler_sample` occupying the worker thread, including `ggml_backend_sched_synchronize` / Metal `waitUntilCompleted`, followed by substantial `llama_sampler_top_p_apply` work. The server created a temperature sampler, top-p sampler, and distribution sampler even for `temperature: 0` requests.

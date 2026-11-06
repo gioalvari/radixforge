@@ -1,6 +1,7 @@
 #pragma once
 
 #include "radixforge/config.h"
+#include "radixforge/perf_metrics.h"
 #include "llama.h"
 
 #include <memory>
@@ -23,7 +24,7 @@ using LlamaContextPtr = std::unique_ptr<llama_context, LlamaContextDeleter>;
 
 class LlamaBridge {
   public:
-    explicit LlamaBridge(const Config& config);
+    explicit LlamaBridge(const Config& config, PerfMetrics* perf_metrics = nullptr);
     ~LlamaBridge();
 
     // Non-copyable, non-movable
@@ -51,6 +52,8 @@ class LlamaBridge {
 
     // Tokenize a string into token IDs
     std::vector<llama_token> tokenize(const std::string& text, bool add_bos = true) const;
+    llama_token sample(llama_sampler* sampler, int32_t logits_index) const;
+    std::string token_to_piece(llama_token token) const;
 
     // Memory (KV cache) operations — uses llama_memory_* API
     void memory_seq_cp(llama_seq_id src, llama_seq_id dst, int32_t p0, int32_t p1);
@@ -67,6 +70,7 @@ class LlamaBridge {
 
   private:
     Config config_;
+    PerfMetrics* perf_metrics_ = nullptr;
     LlamaModelPtr model_;
     LlamaContextPtr ctx_;
     const llama_vocab* vocab_ = nullptr;

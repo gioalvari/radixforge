@@ -37,6 +37,7 @@ struct Config {
 
     // Logging
     std::string log_level = "info"; // debug | info | warn | error
+    bool debug_metrics = false;     // collect opt-in component timings
 };
 
 } // namespace radixforge

@@ -3,6 +3,7 @@
 #include "radixforge/config.h"
 #include "radixforge/kv_mapper.h"
 #include "radixforge/llama_bridge.h"
+#include "radixforge/perf_metrics.h"
 #include "radixforge/radix_tree.h"
 
 #include <atomic>
@@ -53,6 +54,7 @@ struct InferenceRequest {
     std::function<bool()> cancelled;
     std::function<void()> on_cancel;
     std::chrono::steady_clock::time_point admitted_at;
+    bool queue_wait_recorded = false;
 };
 
 // Internal prefill context.  It remains pending until every prompt token has
@@ -87,7 +89,8 @@ struct ActiveSeq {
 // admitted between one-token decode steps and completed sequences leave at once.
 class InferenceWorker {
   public:
-    InferenceWorker(LlamaBridge& bridge, RadixTree& tree, KVMapper& mapper, const Config& config);
+    InferenceWorker(LlamaBridge& bridge, RadixTree& tree, KVMapper& mapper, const Config& config,
+                    PerfMetrics* perf_metrics = nullptr);
     ~InferenceWorker();
 
     void start();
@@ -115,6 +118,7 @@ class InferenceWorker {
     std::atomic<uint64_t> prefill_calls_{0};
     std::atomic<uint64_t> cancelled_requests_{0};
     std::atomic<int32_t> in_flight_requests_{0};
+    PerfMetrics* perf_metrics_ = nullptr;
 
     void run();
     // Step 1: tokenise + KV-prepare every request, build PrefillCtx list.
@@ -150,7 +154,8 @@ class InferenceWorker {
 // HTTP server using cpp-httplib (OpenAI-compatible /v1/chat/completions).
 class Server {
   public:
-    Server(const Config& config, InferenceWorker& worker, KVMapper& mapper, RadixTree& tree);
+    Server(const Config& config, InferenceWorker& worker, KVMapper& mapper, RadixTree& tree,
+           PerfMetrics* perf_metrics = nullptr);
 
     void start(); // blocking
     void stop();  // thread-safe; interrupts start() from another thread
@@ -165,6 +170,7 @@ class Server {
     std::atomic<bool> running_{false};
     std::atomic<bool> accepting_{true};
     std::function<void()> stop_fn_; // set by start(), called by stop()
+    PerfMetrics* perf_metrics_ = nullptr;
 };
 
 } // namespace radixforge
