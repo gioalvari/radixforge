@@ -236,6 +236,8 @@ def phase(
                 "prefill_decode_tokens_total",
                 "generation_decode_microseconds_total",
                 "generation_decode_tokens_total",
+                "sync_microseconds_total",
+                "sync_calls_total",
                 "sampler_microseconds_total",
                 "sampler_calls_total",
                 "callback_microseconds_total",
