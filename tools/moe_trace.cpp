@@ -312,7 +312,8 @@ int main(int argc, char** argv) {
                 fail("llama_decode failed with code " + std::to_string(rc));
             }
             if (cap.n_tokens != n || cap.by_layer.empty()) {
-                fail("routing capture mismatch (ubatch split?)");
+                fail("routing capture mismatch (expected " + std::to_string(n) +
+                     ", captured " + std::to_string(cap.n_tokens) + ")");
             }
             if (moe_layers.empty()) {
                 for (const auto& [layer, _] : cap.by_layer)
@@ -343,7 +344,7 @@ int main(int argc, char** argv) {
             const auto t0 = std::chrono::steady_clock::now();
             int pos = 0;
             while (pos < static_cast<int>(prompt.size())) {
-                const int n = std::min<int>(512, static_cast<int>(prompt.size()) - pos);
+                const int n = 1;
                 decode(prompt.data() + pos, n, pos, trace);
                 pos += n;
             }
