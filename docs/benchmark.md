@@ -14,20 +14,20 @@
 
 This is a single-machine, small-model comparison. It is a reproducible engineering measurement, not a general performance claim.
 
-## Results on llama.cpp v0.8.0
+## Matched-KV results on llama.cpp v0.8.0
 
 Each cell is the median of three fresh-process repetitions. The bracket is the min--max range across repetitions. Every repetition measured 24 streaming `/completion` requests after one excluded warm-up request.
 
 | Concurrency | Server and cache mode | TTFT p50 (ms) | TTFT p95 (ms) | E2E p50 (ms) | E2E p95 (ms) | Throughput (req/s) | Cache-hit token ratio |
 | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | RadixForge, `--no-prefix-cache` | 44.2 [43.9--44.2] | 45.5 [44.7--45.7] | 107.7 [106.7--107.9] | 109.6 [108.5--110.8] | 9.3 [9.3--9.4] | 0.0% |
-| 1 | RadixForge, cache enabled | 8.4 [8.3--8.4] | 9.3 [9.3--9.6] | 70.7 [70.2--71.3] | 73.3 [73.1--75.5] | 14.0 [12.5--14.3] | 96.3% |
-| 1 | llama-server, `cache_prompt: false` | 39.3 [39.2--39.4] | 39.7 [39.4--40.1] | 73.8 [73.5--75.2] | 77.3 [77.3--80.1] | 13.4 [13.2--13.5] | 0.0% |
-| 1 | llama-server, `cache_prompt: true` | 7.7 [7.7--7.8] | 8.4 [8.3--9.0] | 41.8 [41.7--43.4] | 46.4 [45.8--46.4] | 23.3 [23.2--23.3] | 96.3% |
-| 4 | RadixForge, `--no-prefix-cache` | 112.5 [112.4--112.7] | 151.6 [151.5--351.5] | 220.3 [219.6--220.3] | 226.2 [225.7--568.5] | 17.7 [14.1--17.8] | 0.0% |
-| 4 | RadixForge, cache enabled | 20.6 [20.6--21.0] | 21.6 [21.5--21.8] | 92.9 [91.7--93.1] | 95.0 [94.4--98.1] | 42.8 [42.6--42.8] | 96.3% |
-| 4 | llama-server, `cache_prompt: false` | 140.2 [139.8--140.9] | 149.8 [149.1--150.3] | 186.2 [184.2--188.4] | 197.5 [197.5--198.0] | 21.2 [21.1--21.3] | 0.0% |
-| 4 | llama-server, `cache_prompt: true` | 19.6 [19.5--20.0] | 116.8 [115.7--119.4] | 64.9 [64.2--67.3] | 164.1 [162.6--167.2] | 49.2 [47.6--49.4] | 84.2% |
+| 1 | RadixForge, `--no-prefix-cache` | 43.9 [42.7--44.6] | 47.0 [46.0--47.0] | 111.4 [102.7--114.7] | 120.4 [108.3--123.1] | 8.9 [8.4--9.4] | 0.0% |
+| 1 | RadixForge, cache enabled | 8.4 [8.3--9.4] | 10.2 [9.8--10.4] | 74.4 [73.4--75.0] | 85.8 [78.8--86.2] | 13.1 [12.8--13.7] | 96.3% |
+| 1 | llama-server, `cache_prompt: false`, `--kv-unified` | 44.5 [43.9--44.9] | 48.2 [46.9--48.7] | 113.2 [113.1--114.8] | 125.2 [117.6--126.6] | 7.6 [7.3--8.8] | 0.0% |
+| 1 | llama-server, `cache_prompt: true`, `--kv-unified` | 9.8 [8.8--10.2] | 18.6 [12.4--18.6] | 84.3 [79.0--87.0] | 93.0 [83.7--94.2] | 10.2 [9.9--10.3] | 96.3% |
+| 4 | RadixForge, `--no-prefix-cache` | 128.4 [121.4--131.4] | 182.8 [179.0--564.7] | 257.2 [257.0--260.5] | 615.0 [266.5--639.3] | 12.5 [12.4--12.7] | 0.0% |
+| 4 | RadixForge, cache enabled | 22.6 [21.7--22.9] | 26.9 [26.9--28.4] | 106.1 [104.3--108.8] | 118.5 [114.7--118.9] | 36.9 [35.9--37.8] | 96.3% |
+| 4 | llama-server, `cache_prompt: false`, `--kv-unified` | 172.4 [163.7--174.8] | 184.5 [176.3--185.1] | 266.9 [253.3--283.2] | 281.8 [269.2--293.1] | 14.9 [14.0--15.1] | 0.0% |
+| 4 | llama-server, `cache_prompt: true`, `--kv-unified` | 21.3 [21.1--21.7] | 128.5 [127.5--129.3] | 107.9 [107.9--112.6] | 211.7 [210.8--212.8] | 31.7 [31.5--31.8] | 84.2% |
 
 Cache-hit ratio is cache-hit tokens divided by cache-hit plus newly evaluated prompt tokens. For RadixForge it comes from the delta of `/metrics` counters. For llama-server it is aggregated from terminal streaming `timings.cache_n` and `timings.prompt_n` fields. The two counters are comparable as an indication of prompt work avoided, but not guaranteed to have identical internal definitions.
 
@@ -37,10 +37,10 @@ Cache-hit ratio is cache-hit tokens divided by cache-hit plus newly evaluated pr
 
 | Concurrency | Queue wait (ms/req) | Cache lookup / insert (ms/call) | Prefill decode (ms/token) | Generation decode (ms/token) | Sync (ms/call) | Sampler (ms/call) | Callback (ms/call) | SSE write (ms/write) |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1 | 0.005 | 0.001 / 0.015 | 0.116 | 0.541 | 3.650 | 0.080 | 0.066 | 0.042 |
-| 4 | 5.453 | 0.000 / 0.013 | 0.057 | 0.147 | 1.133 | 0.074 | 0.037 | 0.019 |
+| 1 | 0.007 | 0.001 / 0.016 | 0.121 | 0.615 | 3.845 | 0.089 | 0.074 | 0.047 |
+| 4 | 6.108 | 0.000 / 0.014 | 0.061 | 0.159 | 1.356 | 0.081 | 0.041 | 0.021 |
 
-The former sampler number included asynchronous Metal completion. In debug-metrics mode only, RadixForge now calls and measures `llama_synchronize(ctx)` immediately before sampling; the sampler counter starts afterward. At c=1, 360 generated tokens accumulated 194.8 ms in generation decode, 1,401.5 ms waiting for synchronization, and 30.6 ms in sampler execution. At c=4, the corresponding values were 52.9 ms, 435.0 ms, and 28.5 ms. The 131.0 ms total queue wait at c=4 reflects intentional concurrent request arrival and batching, rather than a per-token cost. These counters are opt-in: without `--debug-metrics`, RadixForge does not allocate the counter set, read timing clocks, or add a synchronization call on these paths.
+The former sampler number included asynchronous Metal completion. In debug-metrics mode only, RadixForge calls and measures `llama_synchronize(ctx)` immediately before sampling; the sampler counter starts afterward. At c=1, 360 generated tokens accumulated 221.5 ms in generation decode, 1,476.5 ms waiting for synchronization, and 34.3 ms in sampler execution. At c=4, the corresponding values were 57.1 ms, 520.8 ms, and 31.1 ms. The 146.6 ms total queue wait at c=4 reflects intentional concurrent request arrival and batching, rather than a per-token cost. These counters are opt-in: without `--debug-metrics`, RadixForge does not allocate the counter set, read timing clocks, or add a synchronization call on these paths.
 
 ## Performance fixes
 
@@ -48,7 +48,7 @@ The earlier cache-on concurrency-1 result for RadixForge was 16.8 ms TTFT, 126.2
 
 RadixForge now creates llama.cpp's greedy sampler directly when `temperature <= 0`, avoiding the full-vocabulary temperature/top-p/distribution sampling path while preserving greedy output. On the same c=1 cache-on workload, E2E p50 fell from 126.2 ms to 67.8 ms and throughput rose from 7.79 to 14.48 req/s; TTFT fell from 16.8 ms to 12.3 ms. The byte output for a representative 24-token Qwen completion was identical before and after the change. Cache-on c=4 throughput rose from 17.80 to 30.29 req/s.
 
-A remaining cache-on E2E gap on v0.8.0 is 70.7 ms versus llama-server's 41.8 ms at c=1, and 92.9 ms versus 64.9 ms at c=4. The split counter shows that the old 3.606 ms/token "sampler" reading at c=1 was almost entirely GPU completion: 3.650 ms/token is synchronization and only 0.080 ms/token is sampling. The remaining difference also includes separate worker scheduling, per-token callback/SSE handling, and different batching/slot implementations; this run does not attribute the gap to a single component.
+The prior comparison was not KV-equivalent. With `--parallel 32`, llama-server defaults to `kv_unified = false`, which gives each slot a 256-token KV stream; RadixForge requires one unified 8192-cell pool for zero-copy radix-prefix sharing. Running llama-server with `--kv-unified` makes the c=1 cache-on E2E p50 84.3 ms, versus 74.4 ms for RadixForge; at c=4 it is 107.9 ms versus 106.1 ms. In its default split-KV mode, llama-server's cache-on E2E p50 was 52.4 ms at c=1 and 82.6 ms at c=4 in the same session, so on this single-prefix workload the default llama-server configuration remains faster; the gap comes from its smaller per-slot attention domain, not from RadixForge's sampler or HTTP path. The split counter shows that the 3.845 ms/token c=1 synchronization time is GPU completion, while sampling itself is only 0.089 ms/token.
 
 ## Method
 
@@ -68,16 +68,16 @@ The cache-off condition adds `--no-prefix-cache` and otherwise uses exactly the 
 Vendored llama-server was built separately in Release mode with `LLAMA_BUILD_SERVER=ON` and `GGML_METAL=ON`, then started with:
 
 ```text
---ctx-size 8192 --parallel 32 --n-gpu-layers 99 --flash-attn auto --no-webui
+--ctx-size 8192 --parallel 32 --n-gpu-layers 99 --flash-attn auto --no-webui --kv-unified
 ```
 
-The request body sets `cache_prompt` to `true` or `false`. `--cache-reuse` was left at its documented default of `0`: this comparison measures the server's ordinary per-slot prompt reuse, not KV-shifting chunk reuse. RadixForge has no flash-attention switch and uses llama.cpp context defaults; llama-server explicitly used its default `auto` mode, so flash-attention behavior is not a controlled variable beyond each server's defaults.
+The request body sets `cache_prompt` to `true` or `false`. `--cache-reuse` was left at its documented default of `0`: this comparison measures the server's ordinary per-slot prompt reuse, not KV-shifting chunk reuse. `--kv-unified` is required for a like-for-like shared 8192-cell pool: without it, explicit `--parallel 32` leaves llama-server in its default split-KV mode, with 256 cells per slot. RadixForge has no flash-attention switch and uses llama.cpp context defaults; llama-server explicitly used its default `auto` mode, so flash-attention behavior is not a controlled variable beyond each server's defaults.
 
 ## Interpretation
 
-Both servers reduce first-token latency with prompt caching. RadixForge's strict same-prompt cache-on/off comparison reaches 96.3% prompt-token reuse and improves c=1 median TTFT from 39.1 ms to 12.3 ms. After bypassing unnecessary non-greedy sampler stages, RadixForge's cache-enabled c=4 throughput is 30.29 req/s, near llama-server's 37.96 req/s on this workload.
+Both servers reduce first-token latency with prompt caching. RadixForge's strict same-prompt cache-on/off comparison reaches 96.3% prompt-token reuse and improves c=1 median TTFT from 43.9 ms to 8.4 ms. Its cache-enabled c=4 throughput is 36.9 req/s, above the 31.7 req/s from unified-KV llama-server on this workload.
 
-llama-server remains faster for the cache-enabled end-to-end path in this test: 28.9 ms lower E2E p50 at c=1 and 28.0 ms lower at c=4. The strongest evidence-based hypothesis is per-token Metal synchronization/scheduling in RadixForge: its explicit waits total 1,401.5 ms for 384 samples at c=1 and 435.0 ms at c=4, while sampler execution itself is only 30.6 ms and 28.5 ms. Additional measured RadixForge overhead is callback plus SSE work (42.4 ms at c=1; 22.0 ms at c=4), but that alone cannot explain the gap. A remaining unmeasured difference is server architecture: RadixForge's worker/radix-tree scheduling versus llama-server slots and batching. This does not establish a universal winner: llama-server's `cache_prompt` operates through server slots and request scheduling, whereas RadixForge keeps a radix tree that can share a matching prefix across physical sequences, including retained decoded output. The synthetic workload favors one common prefix and does not exercise divergent trees, multi-turn generated-token reuse, eviction pressure, larger models, or mixed arrival patterns.
+The mismatch hypothesis is confirmed. llama.cpp computes unified `n_kv` from the maximum occupied cell index, padded to 256, and the Metal flash-attention kernels iterate over that `n_kv`; the standard kernel skips all-masked blocks, but the vector kernel has no such block bitmap. Split-KV llama-server therefore had a fundamentally smaller 256-cell attention domain. No RadixForge runtime change is safe here: compacting retained cells would require copying KV tensors and updating all radix-tree sequence mappings, defeating its zero-copy shared-prefix invariant. With unified KV matched, RadixForge is 9.9 ms faster at c=1 and 1.8 ms faster at c=4 E2E p50, despite 3.845 ms/token c=1 GPU synchronization plus 0.615 ms/token generation decode. This does not establish a universal winner: llama-server's `cache_prompt` operates through server slots and request scheduling, whereas RadixForge keeps a radix tree that can share a matching prefix across physical sequences, including retained decoded output. The synthetic workload favors one common prefix and does not exercise divergent trees, multi-turn generated-token reuse, eviction pressure, larger models, or mixed arrival patterns.
 
 ## Reproduce
 
@@ -96,7 +96,8 @@ uvx ruff check scripts/
 uvx ruff format --check scripts/
 python3 scripts/benchmark_current.py \
   --model ~/local-llm-bench/models/Qwen2.5-0.5B-Instruct-Q4_K_M.gguf \
-  --out .cache/benchmark-comparison/results.json --repetitions 3
+  --out .cache/benchmark-comparison/results.json --repetitions 3 \
+  --debug-metrics --llama-kv-unified
 ```
 
 ## Caveats

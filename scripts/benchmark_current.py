@@ -156,6 +156,8 @@ def start(
             "auto",
             "--no-webui",
         ]
+        if args.llama_kv_unified:
+            command.append("--kv-unified")
     return subprocess.Popen(
         command, stdout=log.open("w"), stderr=subprocess.STDOUT, text=True
     )
@@ -270,6 +272,11 @@ def main() -> None:
     parser.add_argument("--concurrency", type=int, action="append", choices=(1, 4))
     parser.add_argument("--cache-enabled-only", action="store_true")
     parser.add_argument("--debug-metrics", action="store_true")
+    parser.add_argument(
+        "--llama-kv-unified",
+        action="store_true",
+        help="Start llama-server with its unified KV cache enabled.",
+    )
     args = parser.parse_args()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     report: dict[str, Any] = {}
