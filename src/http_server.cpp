@@ -154,6 +154,10 @@ void Server::start() {
                            perf_metrics_->generation_decode_us.load(std::memory_order_relaxed));
             append_counter("radixforge_generation_decode_tokens_total",
                            perf_metrics_->generation_decode_tokens.load(std::memory_order_relaxed));
+            append_counter("radixforge_sync_microseconds_total",
+                           perf_metrics_->sync_us.load(std::memory_order_relaxed));
+            append_counter("radixforge_sync_calls_total",
+                           perf_metrics_->sync_calls.load(std::memory_order_relaxed));
             append_counter("radixforge_sampler_microseconds_total",
                            perf_metrics_->sampler_us.load(std::memory_order_relaxed));
             append_counter("radixforge_sampler_calls_total",

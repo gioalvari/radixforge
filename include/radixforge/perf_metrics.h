@@ -20,6 +20,8 @@ struct PerfMetrics {
     std::atomic<uint64_t> prefill_decode_tokens{0};
     std::atomic<uint64_t> generation_decode_us{0};
     std::atomic<uint64_t> generation_decode_tokens{0};
+    std::atomic<uint64_t> sync_us{0};
+    std::atomic<uint64_t> sync_calls{0};
     std::atomic<uint64_t> sampler_us{0};
     std::atomic<uint64_t> sampler_calls{0};
     std::atomic<uint64_t> callback_us{0};

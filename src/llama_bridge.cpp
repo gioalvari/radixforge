@@ -78,16 +78,23 @@ std::vector<llama_token> LlamaBridge::tokenize(const std::string& text, bool add
 }
 
 llama_token LlamaBridge::sample(llama_sampler* sampler, int32_t logits_index) const {
-    const auto started =
-        perf_metrics_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
-    const llama_token token = llama_sampler_sample(sampler, ctx_.get(), logits_index);
     if (perf_metrics_) {
-        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now() - started);
-        perf_metrics_->sampler_us.fetch_add(elapsed.count(), std::memory_order_relaxed);
+        const auto sync_started = std::chrono::steady_clock::now();
+        llama_synchronize(ctx_.get());
+        const auto sync_elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - sync_started);
+        perf_metrics_->sync_us.fetch_add(sync_elapsed.count(), std::memory_order_relaxed);
+        perf_metrics_->sync_calls.fetch_add(1, std::memory_order_relaxed);
+
+        const auto sampler_started = std::chrono::steady_clock::now();
+        const llama_token token = llama_sampler_sample(sampler, ctx_.get(), logits_index);
+        const auto sampler_elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - sampler_started);
+        perf_metrics_->sampler_us.fetch_add(sampler_elapsed.count(), std::memory_order_relaxed);
         perf_metrics_->sampler_calls.fetch_add(1, std::memory_order_relaxed);
+        return token;
     }
-    return token;
+    return llama_sampler_sample(sampler, ctx_.get(), logits_index);
 }
 
 void LlamaBridge::memory_seq_cp(llama_seq_id src, llama_seq_id dst, int32_t p0, int32_t p1) {
