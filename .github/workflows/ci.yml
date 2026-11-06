@@ -157,7 +157,7 @@ jobs:
           -DRADIXFORGE_E2E_MODEL="$HOME/.cache/radixforge/models/stories260K.gguf"
 
       - name: Build
-        run: cmake --build build-e2e --parallel
+        run: cmake --build build-e2e -j "$(nproc)"
 
       - name: Run end-to-end tests
         run: >-
