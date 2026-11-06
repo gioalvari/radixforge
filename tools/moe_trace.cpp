@@ -312,8 +312,8 @@ int main(int argc, char** argv) {
                 fail("llama_decode failed with code " + std::to_string(rc));
             }
             if (cap.n_tokens != n || cap.by_layer.empty()) {
-                fail("routing capture mismatch (expected " + std::to_string(n) +
-                     ", captured " + std::to_string(cap.n_tokens) + ")");
+                fail("routing capture mismatch (expected " + std::to_string(n) + ", captured " +
+                     std::to_string(cap.n_tokens) + ")");
             }
             if (moe_layers.empty()) {
                 for (const auto& [layer, _] : cap.by_layer)
