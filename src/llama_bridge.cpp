@@ -57,8 +57,8 @@ LlamaBridge::~LlamaBridge() {
 }
 
 std::vector<llama_token> LlamaBridge::tokenize(const std::string& text, bool add_bos) const {
-    const auto started = perf_metrics_ ? std::chrono::steady_clock::now()
-                                       : std::chrono::steady_clock::time_point{};
+    const auto started =
+        perf_metrics_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     std::vector<llama_token> tokens(text.size() + 16);
     int32_t n = llama_tokenize(vocab_, text.c_str(), text.size(), tokens.data(),
                                static_cast<int32_t>(tokens.size()), add_bos, true);
@@ -78,8 +78,8 @@ std::vector<llama_token> LlamaBridge::tokenize(const std::string& text, bool add
 }
 
 llama_token LlamaBridge::sample(llama_sampler* sampler, int32_t logits_index) const {
-    const auto started = perf_metrics_ ? std::chrono::steady_clock::now()
-                                       : std::chrono::steady_clock::time_point{};
+    const auto started =
+        perf_metrics_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const llama_token token = llama_sampler_sample(sampler, ctx_.get(), logits_index);
     if (perf_metrics_) {
         const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(

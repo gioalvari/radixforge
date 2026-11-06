@@ -130,24 +130,42 @@ void Server::start() {
                 body += std::string("# TYPE ") + name + " counter\n" + name + " " +
                         std::to_string(value) + "\n";
             };
-            append_counter("radixforge_queue_wait_microseconds_total", perf_metrics_->queue_wait_us.load(std::memory_order_relaxed));
-            append_counter("radixforge_queue_wait_requests_total", perf_metrics_->queue_wait_requests.load(std::memory_order_relaxed));
-            append_counter("radixforge_tokenize_microseconds_total", perf_metrics_->tokenize_us.load(std::memory_order_relaxed));
-            append_counter("radixforge_tokenize_calls_total", perf_metrics_->tokenize_calls.load(std::memory_order_relaxed));
-            append_counter("radixforge_cache_lookup_microseconds_total", perf_metrics_->cache_lookup_us.load(std::memory_order_relaxed));
-            append_counter("radixforge_cache_lookup_calls_total", perf_metrics_->cache_lookup_calls.load(std::memory_order_relaxed));
-            append_counter("radixforge_cache_insert_microseconds_total", perf_metrics_->cache_insert_us.load(std::memory_order_relaxed));
-            append_counter("radixforge_cache_insert_calls_total", perf_metrics_->cache_insert_calls.load(std::memory_order_relaxed));
-            append_counter("radixforge_prefill_decode_microseconds_total", perf_metrics_->prefill_decode_us.load(std::memory_order_relaxed));
-            append_counter("radixforge_prefill_decode_tokens_total", perf_metrics_->prefill_decode_tokens.load(std::memory_order_relaxed));
-            append_counter("radixforge_generation_decode_microseconds_total", perf_metrics_->generation_decode_us.load(std::memory_order_relaxed));
-            append_counter("radixforge_generation_decode_tokens_total", perf_metrics_->generation_decode_tokens.load(std::memory_order_relaxed));
-            append_counter("radixforge_sampler_microseconds_total", perf_metrics_->sampler_us.load(std::memory_order_relaxed));
-            append_counter("radixforge_sampler_calls_total", perf_metrics_->sampler_calls.load(std::memory_order_relaxed));
-            append_counter("radixforge_callback_microseconds_total", perf_metrics_->callback_us.load(std::memory_order_relaxed));
-            append_counter("radixforge_callback_calls_total", perf_metrics_->callback_calls.load(std::memory_order_relaxed));
-            append_counter("radixforge_sse_write_microseconds_total", perf_metrics_->sse_write_us.load(std::memory_order_relaxed));
-            append_counter("radixforge_sse_writes_total", perf_metrics_->sse_writes.load(std::memory_order_relaxed));
+            append_counter("radixforge_queue_wait_microseconds_total",
+                           perf_metrics_->queue_wait_us.load(std::memory_order_relaxed));
+            append_counter("radixforge_queue_wait_requests_total",
+                           perf_metrics_->queue_wait_requests.load(std::memory_order_relaxed));
+            append_counter("radixforge_tokenize_microseconds_total",
+                           perf_metrics_->tokenize_us.load(std::memory_order_relaxed));
+            append_counter("radixforge_tokenize_calls_total",
+                           perf_metrics_->tokenize_calls.load(std::memory_order_relaxed));
+            append_counter("radixforge_cache_lookup_microseconds_total",
+                           perf_metrics_->cache_lookup_us.load(std::memory_order_relaxed));
+            append_counter("radixforge_cache_lookup_calls_total",
+                           perf_metrics_->cache_lookup_calls.load(std::memory_order_relaxed));
+            append_counter("radixforge_cache_insert_microseconds_total",
+                           perf_metrics_->cache_insert_us.load(std::memory_order_relaxed));
+            append_counter("radixforge_cache_insert_calls_total",
+                           perf_metrics_->cache_insert_calls.load(std::memory_order_relaxed));
+            append_counter("radixforge_prefill_decode_microseconds_total",
+                           perf_metrics_->prefill_decode_us.load(std::memory_order_relaxed));
+            append_counter("radixforge_prefill_decode_tokens_total",
+                           perf_metrics_->prefill_decode_tokens.load(std::memory_order_relaxed));
+            append_counter("radixforge_generation_decode_microseconds_total",
+                           perf_metrics_->generation_decode_us.load(std::memory_order_relaxed));
+            append_counter("radixforge_generation_decode_tokens_total",
+                           perf_metrics_->generation_decode_tokens.load(std::memory_order_relaxed));
+            append_counter("radixforge_sampler_microseconds_total",
+                           perf_metrics_->sampler_us.load(std::memory_order_relaxed));
+            append_counter("radixforge_sampler_calls_total",
+                           perf_metrics_->sampler_calls.load(std::memory_order_relaxed));
+            append_counter("radixforge_callback_microseconds_total",
+                           perf_metrics_->callback_us.load(std::memory_order_relaxed));
+            append_counter("radixforge_callback_calls_total",
+                           perf_metrics_->callback_calls.load(std::memory_order_relaxed));
+            append_counter("radixforge_sse_write_microseconds_total",
+                           perf_metrics_->sse_write_us.load(std::memory_order_relaxed));
+            append_counter("radixforge_sse_writes_total",
+                           perf_metrics_->sse_writes.load(std::memory_order_relaxed));
         }
         res.set_header("Access-Control-Allow-Origin", "*");
         res.set_content(body, "text/plain; version=0.0.4; charset=utf-8");
@@ -268,17 +286,18 @@ void Server::start() {
                                                ",\"usage\":" + openai_api::usage_json(*stats)
                                          : "") +
                                     (is_last && stats ? "}" : "}]}") + "\n\n";
-                                const auto write_started = perf_metrics
-                                                               ? std::chrono::steady_clock::now()
-                                                               : std::chrono::steady_clock::time_point{};
+                                const auto write_started =
+                                    perf_metrics ? std::chrono::steady_clock::now()
+                                                 : std::chrono::steady_clock::time_point{};
                                 const bool wrote_chunk = sink.write(chunk.c_str(), chunk.size());
                                 if (perf_metrics) {
-                                    const auto elapsed = std::chrono::duration_cast<
-                                        std::chrono::microseconds>(
-                                        std::chrono::steady_clock::now() - write_started);
+                                    const auto elapsed =
+                                        std::chrono::duration_cast<std::chrono::microseconds>(
+                                            std::chrono::steady_clock::now() - write_started);
                                     perf_metrics->sse_write_us.fetch_add(elapsed.count(),
                                                                          std::memory_order_relaxed);
-                                    perf_metrics->sse_writes.fetch_add(1, std::memory_order_relaxed);
+                                    perf_metrics->sse_writes.fetch_add(1,
+                                                                       std::memory_order_relaxed);
                                 }
                                 if (!wrote_chunk) {
                                     state->cancelled.store(true, std::memory_order_relaxed);
@@ -287,14 +306,14 @@ void Server::start() {
                                     return;
                                 }
                                 if (is_last) {
-                                    const auto done_started = perf_metrics
-                                                                  ? std::chrono::steady_clock::now()
-                                                                  : std::chrono::steady_clock::time_point{};
+                                    const auto done_started =
+                                        perf_metrics ? std::chrono::steady_clock::now()
+                                                     : std::chrono::steady_clock::time_point{};
                                     const bool wrote_done = sink.write("data: [DONE]\n\n", 14);
                                     if (perf_metrics) {
-                                        const auto elapsed = std::chrono::duration_cast<
-                                            std::chrono::microseconds>(
-                                            std::chrono::steady_clock::now() - done_started);
+                                        const auto elapsed =
+                                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                                std::chrono::steady_clock::now() - done_started);
                                         perf_metrics->sse_write_us.fetch_add(
                                             elapsed.count(), std::memory_order_relaxed);
                                         perf_metrics->sse_writes.fetch_add(

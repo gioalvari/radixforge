@@ -10,7 +10,7 @@ namespace radixforge {
 // --- InferenceWorker ---
 
 InferenceWorker::InferenceWorker(LlamaBridge& bridge, RadixTree& tree, KVMapper& mapper,
-                                  const Config& config, PerfMetrics* perf_metrics)
+                                 const Config& config, PerfMetrics* perf_metrics)
     : bridge_(bridge), tree_(tree), mapper_(mapper), admit_window_ms_(config.admit_window_ms),
       perf_metrics_(perf_metrics) {}
 
@@ -300,8 +300,8 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs, std::vector<Prefi
                 prompt_tokens, decoding);
     }
 
-    const auto decode_started = perf_metrics_ ? std::chrono::steady_clock::now()
-                                              : std::chrono::steady_clock::time_point{};
+    const auto decode_started =
+        perf_metrics_ ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     int decode_status = llama_decode(bridge_.ctx(), batch);
     if (decode_status == 1 && mapper_.evict_idle_sequence()) {
         RF_WARN("worker", "Step stalled by full KV cache; evicted idle cache and retrying");
@@ -319,9 +319,8 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs, std::vector<Prefi
             perf_metrics_->prefill_decode_tokens.fetch_add(prompt_tokens,
                                                            std::memory_order_relaxed);
             perf_metrics_->generation_decode_us.fetch_add(elapsed_us - prefill_us,
-                                                           std::memory_order_relaxed);
-            perf_metrics_->generation_decode_tokens.fetch_add(decoding,
-                                                               std::memory_order_relaxed);
+                                                          std::memory_order_relaxed);
+            perf_metrics_->generation_decode_tokens.fetch_add(decoding, std::memory_order_relaxed);
         }
     }
     llama_batch_free(batch);
