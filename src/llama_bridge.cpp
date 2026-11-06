@@ -1,5 +1,6 @@
 #include "radixforge/llama_bridge.h"
 
+#include <chrono>
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -17,7 +18,8 @@ void LlamaContextDeleter::operator()(llama_context* c) const {
         llama_free(c);
 }
 
-LlamaBridge::LlamaBridge(const Config& config) : config_(config) {
+LlamaBridge::LlamaBridge(const Config& config, PerfMetrics* perf_metrics)
+    : config_(config), perf_metrics_(perf_metrics) {
     llama_backend_init();
 
     auto model_params = llama_model_default_params();
@@ -55,6 +57,8 @@ LlamaBridge::~LlamaBridge() {
 }
 
 std::vector<llama_token> LlamaBridge::tokenize(const std::string& text, bool add_bos) const {
+    const auto started = perf_metrics_ ? std::chrono::steady_clock::now()
+                                       : std::chrono::steady_clock::time_point{};
     std::vector<llama_token> tokens(text.size() + 16);
     int32_t n = llama_tokenize(vocab_, text.c_str(), text.size(), tokens.data(),
                                static_cast<int32_t>(tokens.size()), add_bos, true);
@@ -64,7 +68,26 @@ std::vector<llama_token> LlamaBridge::tokenize(const std::string& text, bool add
                            static_cast<int32_t>(tokens.size()), add_bos, true);
     }
     tokens.resize(n);
+    if (perf_metrics_) {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started);
+        perf_metrics_->tokenize_us.fetch_add(elapsed.count(), std::memory_order_relaxed);
+        perf_metrics_->tokenize_calls.fetch_add(1, std::memory_order_relaxed);
+    }
     return tokens;
+}
+
+llama_token LlamaBridge::sample(llama_sampler* sampler, int32_t logits_index) const {
+    const auto started = perf_metrics_ ? std::chrono::steady_clock::now()
+                                       : std::chrono::steady_clock::time_point{};
+    const llama_token token = llama_sampler_sample(sampler, ctx_.get(), logits_index);
+    if (perf_metrics_) {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - started);
+        perf_metrics_->sampler_us.fetch_add(elapsed.count(), std::memory_order_relaxed);
+        perf_metrics_->sampler_calls.fetch_add(1, std::memory_order_relaxed);
+    }
+    return token;
 }
 
 void LlamaBridge::memory_seq_cp(llama_seq_id src, llama_seq_id dst, int32_t p0, int32_t p1) {

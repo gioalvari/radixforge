@@ -2,6 +2,7 @@
 #include "radixforge/kv_mapper.h"
 #include "radixforge/llama_bridge.h"
 #include "radixforge/logger.h"
+#include "radixforge/perf_metrics.h"
 #include "radixforge/radix_tree.h"
 #include "radixforge/server.h"
 
@@ -11,6 +12,7 @@
 #include <csignal>
 #include <chrono>
 #include <string>
+#include <memory>
 
 static volatile std::sig_atomic_t g_shutdown_requested = 0;
 
@@ -38,6 +40,7 @@ static void print_usage(const char* prog) {
         "  --kv-high-watermark <0..1> Evict idle KV above this context fraction (default: 0.9)\n"
         "  --admin-token <token>      Bearer token for /admin/* endpoints (default: none)\n"
         "  --log-level <level>        Log level: debug|info|warn|error (default: info)\n"
+        "  --debug-metrics            Expose opt-in component timing counters\n"
         "\n",
         prog);
 }
@@ -83,6 +86,8 @@ int main(int argc, char** argv) {
             config.admin_token = argv[++i];
         } else if (arg == "--log-level" && i + 1 < argc) {
             config.log_level = argv[++i];
+        } else if (arg == "--debug-metrics") {
+            config.debug_metrics = true;
         } else {
             print_usage(argv[0]);
             return 1;
@@ -112,7 +117,10 @@ int main(int argc, char** argv) {
             config.n_gpu_layers, config.max_sequences);
 
     // Phase 1: Initialize llama.cpp bridge
-    radixforge::LlamaBridge bridge(config);
+    std::unique_ptr<radixforge::PerfMetrics> perf_metrics;
+    if (config.debug_metrics)
+        perf_metrics = std::make_unique<radixforge::PerfMetrics>();
+    radixforge::LlamaBridge bridge(config, perf_metrics.get());
     RF_INFO("main", "Model loaded. KV cache: %d slots", bridge.n_ctx());
 
     // Phase 2: Initialize Radix Tree
@@ -122,10 +130,10 @@ int main(int argc, char** argv) {
     radixforge::KVMapper mapper(bridge, tree, config);
 
     // Phase 4: Start inference worker and HTTP server
-    radixforge::InferenceWorker worker(bridge, tree, mapper, config);
+    radixforge::InferenceWorker worker(bridge, tree, mapper, config, perf_metrics.get());
     worker.start();
 
-    radixforge::Server server(config, worker, mapper, tree);
+    radixforge::Server server(config, worker, mapper, tree, perf_metrics.get());
     std::thread server_thread([&server] { server.start(); });
     while (!g_shutdown_requested) {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));

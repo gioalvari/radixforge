@@ -10,8 +10,9 @@ namespace radixforge {
 // --- InferenceWorker ---
 
 InferenceWorker::InferenceWorker(LlamaBridge& bridge, RadixTree& tree, KVMapper& mapper,
-                                 const Config& config)
-    : bridge_(bridge), tree_(tree), mapper_(mapper), admit_window_ms_(config.admit_window_ms) {}
+                                  const Config& config, PerfMetrics* perf_metrics)
+    : bridge_(bridge), tree_(tree), mapper_(mapper), admit_window_ms_(config.admit_window_ms),
+      perf_metrics_(perf_metrics) {}
 
 InferenceWorker::~InferenceWorker() {
     stop();
@@ -86,6 +87,13 @@ std::vector<PrefillCtx> InferenceWorker::prepare_all(std::vector<InferenceReques
         auto& req = reqs[req_index];
         if (is_cancelled(req))
             continue;
+        if (perf_metrics_ && !req.queue_wait_recorded) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - req.admitted_at);
+            perf_metrics_->queue_wait_us.fetch_add(elapsed.count(), std::memory_order_relaxed);
+            perf_metrics_->queue_wait_requests.fetch_add(1, std::memory_order_relaxed);
+            req.queue_wait_recorded = true;
+        }
         // Resolve chat template
         std::string prompt = req.prompt;
         if (prompt.empty() && !req.messages.empty()) {
@@ -113,7 +121,15 @@ std::vector<PrefillCtx> InferenceWorker::prepare_all(std::vector<InferenceReques
             req.max_tokens = available;
         }
 
+        const auto lookup_started = perf_metrics_ ? std::chrono::steady_clock::now()
+                                                  : std::chrono::steady_clock::time_point{};
         const PrefixAvailability availability = mapper_.inspect_prefix(tokens);
+        if (perf_metrics_) {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - lookup_started);
+            perf_metrics_->cache_lookup_us.fetch_add(elapsed.count(), std::memory_order_relaxed);
+            perf_metrics_->cache_lookup_calls.fetch_add(1, std::memory_order_relaxed);
+        }
         const int32_t pending_advantage = availability.pending_tokens - availability.ready_tokens;
         if (pending_advantage > 0) {
             // Do not insert/allocate this request yet: the leading pending
@@ -129,7 +145,16 @@ std::vector<PrefillCtx> InferenceWorker::prepare_all(std::vector<InferenceReques
         ctx.tokens = std::move(tokens);
 
         try {
+            const auto insert_started = perf_metrics_ ? std::chrono::steady_clock::now()
+                                                      : std::chrono::steady_clock::time_point{};
             ctx.prep = mapper_.prepare_sequence(ctx.tokens);
+            if (perf_metrics_) {
+                const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - insert_started);
+                perf_metrics_->cache_insert_us.fetch_add(elapsed.count(),
+                                                         std::memory_order_relaxed);
+                perf_metrics_->cache_insert_calls.fetch_add(1, std::memory_order_relaxed);
+            }
         } catch (const SequenceCapacityExhausted&) {
             if (queued) {
                 queued->push_back(std::move(ctx.req));
@@ -275,10 +300,29 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs, std::vector<Prefi
                 prompt_tokens, decoding);
     }
 
+    const auto decode_started = perf_metrics_ ? std::chrono::steady_clock::now()
+                                              : std::chrono::steady_clock::time_point{};
     int decode_status = llama_decode(bridge_.ctx(), batch);
     if (decode_status == 1 && mapper_.evict_idle_sequence()) {
         RF_WARN("worker", "Step stalled by full KV cache; evicted idle cache and retrying");
         decode_status = llama_decode(bridge_.ctx(), batch);
+    }
+    if (perf_metrics_) {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - decode_started);
+        const int32_t total_tokens = decoding + prompt_tokens;
+        if (total_tokens > 0) {
+            const uint64_t elapsed_us = static_cast<uint64_t>(elapsed.count());
+            const uint64_t prefill_us = elapsed_us * static_cast<uint64_t>(prompt_tokens) /
+                                        static_cast<uint64_t>(total_tokens);
+            perf_metrics_->prefill_decode_us.fetch_add(prefill_us, std::memory_order_relaxed);
+            perf_metrics_->prefill_decode_tokens.fetch_add(prompt_tokens,
+                                                           std::memory_order_relaxed);
+            perf_metrics_->generation_decode_us.fetch_add(elapsed_us - prefill_us,
+                                                           std::memory_order_relaxed);
+            perf_metrics_->generation_decode_tokens.fetch_add(decoding,
+                                                               std::memory_order_relaxed);
+        }
     }
     llama_batch_free(batch);
 
@@ -345,7 +389,7 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs, std::vector<Prefi
         ActiveSeq& seq = seqs[i];
         seq.cached_tokens.push_back(seq.next_token);
         mapper_.set_sequence_cell_count(seq.seq_id, seq.pos + 1);
-        llama_token new_tok = llama_sampler_sample(seq.sampler, bridge_.ctx(), i);
+        llama_token new_tok = bridge_.sample(seq.sampler, i);
         if (llama_vocab_is_eog(bridge_.vocab(), new_tok)) {
             seq.done = true;
             seq.notify_on_retire = true;
@@ -364,7 +408,15 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs, std::vector<Prefi
                     std::chrono::duration<double, std::milli>(now - seq.generation_started_at)
                         .count();
             }
+            const auto callback_started = perf_metrics_ ? std::chrono::steady_clock::now()
+                                                        : std::chrono::steady_clock::time_point{};
             seq.req.on_token(piece, last, last ? &seq.stats : nullptr);
+            if (perf_metrics_) {
+                const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - callback_started);
+                perf_metrics_->callback_us.fetch_add(elapsed.count(), std::memory_order_relaxed);
+                perf_metrics_->callback_calls.fetch_add(1, std::memory_order_relaxed);
+            }
         }
         if (last || is_cancelled(seq.req)) {
             seq.done = true;
@@ -398,7 +450,7 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs, std::vector<Prefi
             continue;
         }
         llama_sampler* sampler = bridge_.create_sampler(ctx.req.temperature, ctx.req.top_p);
-        const llama_token first_tok = llama_sampler_sample(sampler, bridge_.ctx(), logit_index);
+        const llama_token first_tok = bridge_.sample(sampler, logit_index);
         ctx.stats.prompt_ms =
             std::chrono::duration<double, std::milli>(now - ctx.req.admitted_at).count();
         if (llama_vocab_is_eog(bridge_.vocab(), first_tok)) {
@@ -419,7 +471,15 @@ void InferenceWorker::fused_step(std::vector<ActiveSeq>& seqs, std::vector<Prefi
         if (first_is_last)
             ctx.stats.predicted_ms = 0.0;
         if (ctx.req.on_token) {
+            const auto callback_started = perf_metrics_ ? std::chrono::steady_clock::now()
+                                                        : std::chrono::steady_clock::time_point{};
             ctx.req.on_token(piece, first_is_last, first_is_last ? &ctx.stats : nullptr);
+            if (perf_metrics_) {
+                const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - callback_started);
+                perf_metrics_->callback_us.fetch_add(elapsed.count(), std::memory_order_relaxed);
+                perf_metrics_->callback_calls.fetch_add(1, std::memory_order_relaxed);
+            }
         }
         if (first_is_last) {
             LlamaBridge::free_sampler(sampler);

@@ -16,8 +16,9 @@ namespace radixforge {
 
 // --- Server (cpp-httplib) ---
 
-Server::Server(const Config& config, InferenceWorker& worker, KVMapper& mapper, RadixTree& tree)
-    : config_(config), worker_(worker), mapper_(mapper), tree_(tree) {}
+Server::Server(const Config& config, InferenceWorker& worker, KVMapper& mapper, RadixTree& tree,
+               PerfMetrics* perf_metrics)
+    : config_(config), worker_(worker), mapper_(mapper), tree_(tree), perf_metrics_(perf_metrics) {}
 
 // Returns true if the request passes admin auth (or auth is disabled).
 static bool check_admin_auth(const Config& config, const httplib::Request& req,
@@ -88,7 +89,7 @@ void Server::start() {
 
     svr.Get("/metrics", [this](const httplib::Request&, httplib::Response& res) {
         const CacheMetrics& metrics = mapper_.metrics();
-        const std::string body =
+        std::string body =
             "# TYPE radixforge_requests_total counter\n"
             "radixforge_requests_total " +
             std::to_string(metrics.total_requests.load(std::memory_order_relaxed)) +
@@ -124,6 +125,30 @@ void Server::start() {
             "# TYPE radixforge_tree_nodes gauge\n"
             "radixforge_tree_nodes " +
             std::to_string(tree_.node_count()) + "\n";
+        if (perf_metrics_) {
+            const auto append_counter = [&body](const char* name, uint64_t value) {
+                body += std::string("# TYPE ") + name + " counter\n" + name + " " +
+                        std::to_string(value) + "\n";
+            };
+            append_counter("radixforge_queue_wait_microseconds_total", perf_metrics_->queue_wait_us.load(std::memory_order_relaxed));
+            append_counter("radixforge_queue_wait_requests_total", perf_metrics_->queue_wait_requests.load(std::memory_order_relaxed));
+            append_counter("radixforge_tokenize_microseconds_total", perf_metrics_->tokenize_us.load(std::memory_order_relaxed));
+            append_counter("radixforge_tokenize_calls_total", perf_metrics_->tokenize_calls.load(std::memory_order_relaxed));
+            append_counter("radixforge_cache_lookup_microseconds_total", perf_metrics_->cache_lookup_us.load(std::memory_order_relaxed));
+            append_counter("radixforge_cache_lookup_calls_total", perf_metrics_->cache_lookup_calls.load(std::memory_order_relaxed));
+            append_counter("radixforge_cache_insert_microseconds_total", perf_metrics_->cache_insert_us.load(std::memory_order_relaxed));
+            append_counter("radixforge_cache_insert_calls_total", perf_metrics_->cache_insert_calls.load(std::memory_order_relaxed));
+            append_counter("radixforge_prefill_decode_microseconds_total", perf_metrics_->prefill_decode_us.load(std::memory_order_relaxed));
+            append_counter("radixforge_prefill_decode_tokens_total", perf_metrics_->prefill_decode_tokens.load(std::memory_order_relaxed));
+            append_counter("radixforge_generation_decode_microseconds_total", perf_metrics_->generation_decode_us.load(std::memory_order_relaxed));
+            append_counter("radixforge_generation_decode_tokens_total", perf_metrics_->generation_decode_tokens.load(std::memory_order_relaxed));
+            append_counter("radixforge_sampler_microseconds_total", perf_metrics_->sampler_us.load(std::memory_order_relaxed));
+            append_counter("radixforge_sampler_calls_total", perf_metrics_->sampler_calls.load(std::memory_order_relaxed));
+            append_counter("radixforge_callback_microseconds_total", perf_metrics_->callback_us.load(std::memory_order_relaxed));
+            append_counter("radixforge_callback_calls_total", perf_metrics_->callback_calls.load(std::memory_order_relaxed));
+            append_counter("radixforge_sse_write_microseconds_total", perf_metrics_->sse_write_us.load(std::memory_order_relaxed));
+            append_counter("radixforge_sse_writes_total", perf_metrics_->sse_writes.load(std::memory_order_relaxed));
+        }
         res.set_header("Access-Control-Allow-Origin", "*");
         res.set_content(body, "text/plain; version=0.0.4; charset=utf-8");
     });
@@ -213,8 +238,9 @@ void Server::start() {
                         if (!state->enqueued) {
                             // The sink is valid until this provider returns. The
                             // mutex synchronizes disconnect with worker writes.
-                            req.on_token = [state, &sink](const std::string& token, bool is_last,
-                                                          const InferenceStats* stats) {
+                            req.on_token = [state, &sink, perf_metrics = perf_metrics_](
+                                               const std::string& token, bool is_last,
+                                               const InferenceStats* stats) {
                                 std::lock_guard<std::mutex> token_lk(state->mtx);
                                 if (state->cancelled.load(std::memory_order_relaxed))
                                     return;
@@ -242,14 +268,39 @@ void Server::start() {
                                                ",\"usage\":" + openai_api::usage_json(*stats)
                                          : "") +
                                     (is_last && stats ? "}" : "}]}") + "\n\n";
-                                if (!sink.write(chunk.c_str(), chunk.size())) {
+                                const auto write_started = perf_metrics
+                                                               ? std::chrono::steady_clock::now()
+                                                               : std::chrono::steady_clock::time_point{};
+                                const bool wrote_chunk = sink.write(chunk.c_str(), chunk.size());
+                                if (perf_metrics) {
+                                    const auto elapsed = std::chrono::duration_cast<
+                                        std::chrono::microseconds>(
+                                        std::chrono::steady_clock::now() - write_started);
+                                    perf_metrics->sse_write_us.fetch_add(elapsed.count(),
+                                                                         std::memory_order_relaxed);
+                                    perf_metrics->sse_writes.fetch_add(1, std::memory_order_relaxed);
+                                }
+                                if (!wrote_chunk) {
                                     state->cancelled.store(true, std::memory_order_relaxed);
                                     state->done = true;
                                     state->cv.notify_one();
                                     return;
                                 }
                                 if (is_last) {
-                                    if (!sink.write("data: [DONE]\n\n", 14)) {
+                                    const auto done_started = perf_metrics
+                                                                  ? std::chrono::steady_clock::now()
+                                                                  : std::chrono::steady_clock::time_point{};
+                                    const bool wrote_done = sink.write("data: [DONE]\n\n", 14);
+                                    if (perf_metrics) {
+                                        const auto elapsed = std::chrono::duration_cast<
+                                            std::chrono::microseconds>(
+                                            std::chrono::steady_clock::now() - done_started);
+                                        perf_metrics->sse_write_us.fetch_add(
+                                            elapsed.count(), std::memory_order_relaxed);
+                                        perf_metrics->sse_writes.fetch_add(
+                                            1, std::memory_order_relaxed);
+                                    }
+                                    if (!wrote_done) {
                                         state->cancelled.store(true, std::memory_order_relaxed);
                                     }
                                     state->done = true;
