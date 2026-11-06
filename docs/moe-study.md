@@ -82,6 +82,49 @@ The report includes:
 
 ## Findings and scope
 
-No generated MoE trace or analysis output is committed in this repository, so this document intentionally reports no numerical finding. The tool and analysis script establish a reproducible measurement path; a conclusion requires an MoE model, representative JSONL workload, and saved trace output.
+### 2026-11-06 representative shared-prefix run
+
+**Conclusion: do not integrate prefix-conditioned expert residency yet.** The
+node profile did not predict decode experts better than the global profile, and
+the simulated prefetch policy increased total expert loads at every tested
+capacity. The workload is deliberately small, so this rules out neither a more
+representative production workload nor a policy that accounts for transfer
+latency; it does show that routing recall alone is insufficient justification.
+
+The run used `bartowski/OLMoE-1B-7B-0924-Instruct-GGUF` IQ2_M (64 experts,
+top-8 routing, 16 MoE layers) on Metal with all layers requested for GPU
+offload. The 12-request synthetic workload has three four-request families
+(`customer-support`, `data-analysis`, and `software-engineering`) with a
+shared system-message prefix and distinct user requests. It generated 372
+decode tokens. At `--min-lcp 32`, 9/12 requests had a radix hit and the mean
+cached-prefix share was 46.7%.
+
+For requests with a radix hit, recall@16 was 0.496 for the node profile versus
+0.497 global, 0.487 delta, 0.520 node+delta, and 0.485 full-prefill reference.
+At 32 slots the values were respectively 0.760, 0.769, 0.749, 0.778, and
+0.750. Thus the node-specific signal was slightly weaker than global routing;
+combining it with the uncached prompt delta improved recall modestly, but not
+enough to lower total loads.
+
+In the cache simulation, total expert loads per decode token (demand plus
+prefetch) for node prefetch versus LRU were 95.78 versus 93.65 at 8 slots,
+64.85 versus 61.41 at 16, 35.31 versus 31.42 at 32, 13.37 versus 10.59 at 48,
+and 2.75 versus 2.72 at 64. Node+delta was also worse than LRU at all those
+capacities (96.82, 66.49, 36.88, 16.30, and 2.75). There is cache-management
+headroom in principle--the Belady oracle was 78.28, 39.55, 14.86, 5.11, and
+2.72 loads per decode token--but this prefix profile did not capture it.
+
+The workload and outputs are uncommitted under `/tmp/radixforge-moe/`:
+
+- workload SHA-256:
+  `79d9d1640e64bb3d406392efc990bf5fec705e29a909c1da4a673e4f45ca651d`;
+- trace binary SHA-256:
+  `1d982787c1947a5e45df08026d25f0ef6b56b396fdf134c37b06198b3a2c1e25`;
+- trace rows SHA-256:
+  `12542daf92654efdac2f44186bdeaa72e9ef812c51f308fd74168fcc2712a1a7`.
+
+The downloaded model is intentionally outside the repository at
+`~/.cache/radixforge/models/OLMoE-1B-7B-0924-Instruct-IQ2_M.gguf` (SHA-256
+`0e87e90113c6581c0253e176d45ade91a3b92cd1d413f34ffedb2c1e97ed0cdb`).
 
 Even if a profile predicts routing well, this study does not implement expert residency, prefetching, or cache policy changes in RadixForge. Any integration would need to account for model/backend support, transfer costs, cache capacity, and the difference between offline routing recall and end-to-end inference latency.
