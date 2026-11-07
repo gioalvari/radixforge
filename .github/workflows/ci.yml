@@ -96,7 +96,7 @@ jobs:
 
       - name: Cache tiny GGUF model
         id: tiny-model-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/radixforge/models/stories260K.gguf
           key: e2e-model-stories260K-v1
@@ -136,7 +136,7 @@ jobs:
 
       - name: Cache tiny GGUF model
         id: tiny-model-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/radixforge/models/stories260K.gguf
           key: e2e-model-stories260K-v1
