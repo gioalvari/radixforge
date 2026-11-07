@@ -32,7 +32,7 @@ jobs:
             cmake_args: -DRADIXFORGE_METAL=OFF -DGGML_NATIVE=OFF
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -115,7 +115,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
